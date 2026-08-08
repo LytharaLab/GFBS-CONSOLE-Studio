@@ -1,8 +1,34 @@
 # Changelog
 
+## 0.2.0 - 2026-08-08 — Visual Studio Update
+
+Major visual-editor rewrite.
+
+- Replaced the default debug-wireframe scene view with a clean Render View.
+- Added Render / Authoring / Interaction Debug view modes.
+- Helpers are hidden by default and selection-scoped in Authoring mode.
+- Replaced the `vanilla_json` 1-block proxy with a real Minecraft Java model preview renderer.
+- Added parent model inheritance, texture variables, elements/faces, UVs, face rotation and element rotation.
+- Added generated-item layer preview.
+- Added project resources, resource-pack roots, Minecraft asset directories and Minecraft client JAR resource sources.
+- Added a lightweight ZIP/JAR reader and Minecraft 1.20.1 asset auto-detection.
+- Improved glTF linked preview and preserved full hierarchy/material preview.
+- Added Preview Runtime property defaults and overrides.
+- Added preview Binding evaluation for direct/map/range/format bindings.
+- Added Indicator -> part alias -> material profile live preview.
+- Added PBR/unlit/neon/fullbright/visible/alpha/emissive profile approximation in Blockbench.
+- Added glTF animation preview driven by Animation node `playing` / `speed` state.
+- Added local interaction simulation for press/release/activate/scroll/drag lifecycle.
+- Added local execution of scene `set`, `toggle`, and `emit` actions; host/custom actions are surfaced as external actions instead of executed.
+- Added quick-create actions for Minecraft model, glTF model, text, common controls and empty Node3D.
+- Changed generic Add Node default from invisible `node_3d` to `model`.
+- Added resolved Preview Runtime state inspector.
+- Preview-only editor state is kept out of Scene JSON.
+- Expanded smoke tests to cover preview bindings, interaction simulation, vanilla model inheritance and JAR resource reading.
+
 ## 0.1.0 - 2026-08-08
 
-Initial complete authoring release for GFBS-Main 3D-CONSOLE `format_version: 1`.
+Initial authoring release for GFBS-Main 3D-CONSOLE `format_version: 1`.
 
 - Custom Blockbench model format and JSON codec.
 - Direct Scene JSON open/save/Save As workflow.

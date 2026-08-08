@@ -1,5 +1,61 @@
 const assert = require('assert');
 const path = require('path');
+const fs = require('fs');
+const os = require('os');
+process.env.GFBS_CONSOLE_STUDIO_TEST = '1';
+
+
+function makeStoredZip(entries) {
+  const locals = [];
+  const centrals = [];
+  let offset = 0;
+  for (const [name, content] of Object.entries(entries)) {
+    const nameBuf = Buffer.from(name, 'utf8');
+    const data = Buffer.from(content, 'utf8');
+    const local = Buffer.alloc(30 + nameBuf.length + data.length);
+    local.writeUInt32LE(0x04034b50, 0);
+    local.writeUInt16LE(20, 4);
+    local.writeUInt16LE(0, 6);
+    local.writeUInt16LE(0, 8);
+    local.writeUInt32LE(0, 14); // CRC intentionally omitted: reader does not validate it
+    local.writeUInt32LE(data.length, 18);
+    local.writeUInt32LE(data.length, 22);
+    local.writeUInt16LE(nameBuf.length, 26);
+    local.writeUInt16LE(0, 28);
+    nameBuf.copy(local, 30);
+    data.copy(local, 30 + nameBuf.length);
+    locals.push(local);
+
+    const central = Buffer.alloc(46 + nameBuf.length);
+    central.writeUInt32LE(0x02014b50, 0);
+    central.writeUInt16LE(20, 4);
+    central.writeUInt16LE(20, 6);
+    central.writeUInt16LE(0, 8);
+    central.writeUInt16LE(0, 10);
+    central.writeUInt32LE(0, 16);
+    central.writeUInt32LE(data.length, 20);
+    central.writeUInt32LE(data.length, 24);
+    central.writeUInt16LE(nameBuf.length, 28);
+    central.writeUInt16LE(0, 30);
+    central.writeUInt16LE(0, 32);
+    central.writeUInt16LE(0, 34);
+    central.writeUInt16LE(0, 36);
+    central.writeUInt32LE(0, 38);
+    central.writeUInt32LE(offset, 42);
+    nameBuf.copy(central, 46);
+    centrals.push(central);
+    offset += local.length;
+  }
+  const centralOffset = offset;
+  const centralData = Buffer.concat(centrals);
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0);
+  eocd.writeUInt16LE(entries && Object.keys(entries).length, 8);
+  eocd.writeUInt16LE(entries && Object.keys(entries).length, 10);
+  eocd.writeUInt32LE(centralData.length, 12);
+  eocd.writeUInt32LE(centralOffset, 16);
+  return Buffer.concat([...locals, centralData, eocd]);
+}
 
 const originalSetTimeout = global.setTimeout;
 global.setTimeout = () => 0; // keep preview refresh out of this headless schema smoke test
@@ -200,7 +256,18 @@ const fixture = {
   ]
 };
 
-const fixturePath = '/tmp/project/src/main/resources/data/gfbs_main/gfbs_console/scenes/test.json';
+const tempProject = fs.mkdtempSync(path.join(os.tmpdir(), 'gfbs-console-studio-'));
+const resources = path.join(tempProject, 'src', 'main', 'resources');
+const sceneDir = path.join(resources, 'data', 'gfbs_main', 'gfbs_console', 'scenes');
+const modelDir = path.join(resources, 'assets', 'minecraft', 'models', 'block');
+fs.mkdirSync(sceneDir, {recursive: true});
+fs.mkdirSync(modelDir, {recursive: true});
+fs.writeFileSync(path.join(modelDir, 'cube_all.json'), JSON.stringify({
+  textures: {all: '#all'},
+  elements: [{from:[0,0,0],to:[16,16,16],faces:{down:{texture:'#all'},up:{texture:'#all'},north:{texture:'#all'},south:{texture:'#all'},west:{texture:'#all'},east:{texture:'#all'}}}]
+}));
+fs.writeFileSync(path.join(modelDir, 'stone.json'), JSON.stringify({parent:'minecraft:block/cube_all', textures:{all:'minecraft:block/stone'}}));
+const fixturePath = path.join(sceneDir, 'test.json');
 createdCodec.load(JSON.parse(JSON.stringify(fixture)), {path: fixturePath, name: 'test.json'});
 assert.strictEqual(Project.export_path, fixturePath, 'scene path is the format export path');
 assert.strictEqual(Project.export_codec, 'gfbs_console_scene', 'scene codec is remembered for Ctrl+S');
@@ -213,6 +280,46 @@ assert.strictEqual(compiled.root.children.length, fixture.root.children.length);
 assert.deepStrictEqual(compiled.properties, fixture.properties);
 assert.deepStrictEqual(compiled.bindings, fixture.bindings);
 assert.deepStrictEqual(compiled.connections, fixture.connections);
+
+const hooks = global.__GFBSConsoleStudioTestHooks;
+assert(hooks, 'test hooks exposed');
+assert.strictEqual(hooks.javaLikeFormat('OUTPUT %03.0f %%', 7), 'OUTPUT 007 %', 'Java-like format preview matches scene binding use');
+let preview = hooks.resolvePreviewValues();
+assert.strictEqual(preview['$root.power'], false, 'preview defaults start from scene state');
+assert.strictEqual(preview['text.text'], 'MODE // STANDBY', 'preview binding format is evaluated');
+hooks.getState().preview_values['power_toggle.state'] = true;
+hooks.getState()._resolved_preview_values = null;
+preview = hooks.resolvePreviewValues();
+assert.strictEqual(preview['$root.power'], true, 'preview override propagates through bindings');
+const powerToggleElement = hooks.collectElements().find(element => element.name === 'power_toggle');
+hooks.getState().preview_values = {};
+hooks.getState()._resolved_preview_values = null;
+const simulationLog = hooks.simulateInteraction(powerToggleElement, 'ACTIVATE', true);
+preview = hooks.resolvePreviewValues();
+assert.strictEqual(preview['power_toggle.state'], true, 'interaction simulation toggles control state like runtime');
+assert.strictEqual(preview['$root.power'], true, 'interaction simulation propagates binding to root property');
+assert(simulationLog.some(line => line.startsWith('HOST gfbs_main:set_power')), 'host action is surfaced but not executed in Blockbench preview');
+hooks.getState().preview_mode = 'debug';
+hooks.getState().minecraft_asset_source = '/editor-only/minecraft.jar';
+const compileAfterPreview = createdCodec.compile({raw: true});
+assert.strictEqual(compileAfterPreview.root.children.find(n => n.id === 'power_toggle'), undefined, 'nested control remains nested rather than leaked to scene root');
+assert(!Object.prototype.hasOwnProperty.call(compileAfterPreview, 'preview_mode'), 'view mode is editor-only and never serialized');
+assert(!Object.prototype.hasOwnProperty.call(compileAfterPreview, 'preview_values'), 'preview overrides are editor-only and never serialized');
+assert(!Object.prototype.hasOwnProperty.call(compileAfterPreview, 'minecraft_asset_source'), 'resource source configuration is editor-only and never serialized');
+const vanilla = hooks.loadVanillaModelDefinition('minecraft:stone');
+assert(Array.isArray(vanilla.elements) && vanilla.elements.length === 1, 'vanilla model parent geometry resolves from workspace assets');
+assert.strictEqual(vanilla.textures.all, 'minecraft:block/stone', 'vanilla child texture override is inherited into parent geometry');
+
+const jarPath = path.join(tempProject, 'minecraft-test.jar');
+fs.writeFileSync(jarPath, makeStoredZip({
+  'assets/minecraft/models/block/jar_only.json': JSON.stringify({parent:'minecraft:block/cube_all', textures:{all:'minecraft:block/jar_only'}}),
+  'assets/minecraft/models/block/cube_all.json': JSON.stringify({elements:[{from:[0,0,0],to:[16,16,16],faces:{down:{texture:'#all'},up:{texture:'#all'},north:{texture:'#all'},south:{texture:'#all'},west:{texture:'#all'},east:{texture:'#all'}}}]})
+}));
+assert.strictEqual(hooks.readZipEntry(jarPath, 'assets/minecraft/models/block/jar_only.json').toString('utf8').includes('cube_all'), true, 'Minecraft JAR/ZIP resource reader works');
+hooks.getState().minecraft_asset_source = jarPath;
+hooks.clearPreviewCaches();
+const jarModel = hooks.loadVanillaModelDefinition('minecraft:jar_only');
+assert(Array.isArray(jarModel.elements) && jarModel.elements.length === 1, 'vanilla model can inherit geometry directly from a selected Minecraft JAR');
 
 function indexNodes(root, map = {}) {
   map[root.id] = root;
@@ -255,6 +362,7 @@ invalidActionType.connections[0].action.type = 'bad action';
 createdCodec.load(invalidActionType, {path: fixturePath, name: 'test.json'});
 assert.throws(() => createdCodec.compile({raw: true}), /validation error/, 'invalid unnamespaced action types are rejected');
 
-console.log('GFBS Console Studio round-trip + validation smoke test: PASS');
+fs.rmSync(tempProject, {recursive:true, force:true});
+console.log('GFBS Console Studio round-trip + visual runtime smoke test: PASS');
 registeredPlugin.options.onunload();
 global.setTimeout = originalSetTimeout;
