@@ -1,4 +1,4 @@
-# GFBS 3D-CONSOLE Studio 0.3.0
+# GFBS 3D-CONSOLE Studio 0.3.1
 
 **GFBS 3D-CONSOLE Studio** 是 LytharaLab 为 GFBS-Main / 3D-CONSOLE 制作的 Blockbench Desktop 可视化 Scene 编辑器。
 
@@ -15,6 +15,7 @@ GFBS Scene JSON 始终是 source of truth；不会要求 `.bbmodel` 中间格式
 ## 0.3 核心升级
 
 - **所有节点都能从画布选中**：每个 Console 节点拥有不可见的拾取代理；模型、文字会按实际内容自动贴合，Interaction 按 hit shape 贴合，纯逻辑节点也保留稳定点击范围。
+- **父子 Transform 真正联动**：移动、旋转或缩放父节点时，整个子树即时跟随，同时继续以局部 Transform 写回 Scene JSON。
 - **不会再由父节点吞掉子节点选择**：父级代理只计算自己的直接视觉内容，不包围整棵子树。
 - **清晰的选中反馈**：Render / Authoring / Debug 三种视图中，当前节点都有轻量琥珀色选择框。
 - **引用安全重命名**：改 Node ID 时同步更新 Indicator、Animation、Binding、Connection、Preview Override 与资源诊断引用；支持 ID 内含 `.`。

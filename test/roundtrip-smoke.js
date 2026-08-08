@@ -336,6 +336,32 @@ assert(raycaster.intersectObject(proxyMesh, false).length > 0, 'fully transparen
 selectableElement.selected = true;
 hooks.updateSelectionProxy(selectableElement);
 assert(proxyMesh.children.some(child => child.userData && child.userData.gfbsSelectionOutline && child.visible), 'selected node gets a visible selection outline');
+
+const ConsoleNodeType = hooks.getConsoleNodeType();
+const parentNode = Object.assign(Object.create(ConsoleNodeType.prototype), {
+  uuid:'parent-transform-test',name:'parent',gfbs_type:'gfbs_main:node_3d',gfbs_spatial:true,
+  position:[16,0,0],rotation:[0,0,0],scale:[1,1,1],gfbs_pivot:[0,0,0],children:[],parent:'root'
+});
+const childNode = Object.assign(Object.create(ConsoleNodeType.prototype), {
+  uuid:'child-transform-test',name:'child',gfbs_type:'gfbs_main:node_3d',gfbs_spatial:true,
+  position:[0,16,0],rotation:[0,0,0],scale:[1,1,1],gfbs_pivot:[0,0,0],children:[],parent:parentNode
+});
+parentNode.children.push(childNode);
+const parentMesh = new ThreeRuntime.Group();
+const childMesh = new ThreeRuntime.Group();
+Object.defineProperty(parentNode,'mesh',{value:parentMesh,configurable:true});
+Object.defineProperty(childNode,'mesh',{value:childMesh,configurable:true});
+Project.model_3d = new ThreeRuntime.Group();
+hooks.applyTransformTree(parentNode);
+assert.strictEqual(parentMesh.parent, Project.model_3d, 'root Console node is attached to the project scene');
+assert.strictEqual(childMesh.parent, parentMesh, 'child Console node is attached to its parent preview object');
+let childWorld = new ThreeRuntime.Vector3();
+childMesh.getWorldPosition(childWorld);
+assert.deepStrictEqual(childWorld.toArray().map(Math.round), [16,16,0], 'child world transform initially includes parent position');
+parentNode.position = [32,0,0];
+hooks.applyTransformTree(parentNode);
+childMesh.getWorldPosition(childWorld);
+assert.deepStrictEqual(childWorld.toArray().map(Math.round), [32,16,0], 'moving a parent updates the child world transform');
 global.THREE = {};
 
 assert.strictEqual(hooks.javaLikeFormat('OUTPUT %03.0f %%', 7), 'OUTPUT 007 %', 'Java-like format preview matches scene binding use');

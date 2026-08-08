@@ -12,7 +12,7 @@
     const PLUGIN_ID = 'gfbs_console_studio';
     const FORMAT_ID = 'gfbs_console_scene';
     const CODEC_ID = 'gfbs_console_scene';
-    const VERSION = '0.3.0';
+    const VERSION = '0.3.1';
     const BB_UNITS_PER_BLOCK = 16;
     const MAX_DEPTH = 64;
     const MAX_NODES = 4096;
@@ -2116,6 +2116,16 @@
         mesh.updateMatrixWorld(true);
     }
 
+    function applyTransformTree(element, visited = new Set()) {
+        if (!(element instanceof ConsoleNodeElement) || visited.has(element)) return;
+        visited.add(element);
+        applyTransform(element);
+        (element.children || []).forEach(child => {
+            if (child instanceof ConsoleNodeElement) applyTransformTree(child, visited);
+        });
+        if (element.mesh) element.mesh.updateMatrixWorld(true);
+    }
+
     function layoutOffsetFor(element) {
         const parent = element.parent;
         if (!parent || parent === 'root' || !(parent instanceof ConsoleNodeElement) || !LAYOUT_TYPES.has(parent.gfbs_type)) return [0, 0, 0];
@@ -2132,8 +2142,12 @@
 
     function refreshAllTransforms() {
         if (!ConsoleNodeElement) return;
-        ConsoleNodeElement.all.forEach(element => applyTransform(element));
-        if (typeof Canvas !== 'undefined' && Canvas.updateView) Canvas.updateView({elements: ConsoleNodeElement.all, element_aspects: {transform: true, geometry: true}, selection: true});
+        const visited = new Set();
+        Outliner.root.filter(element => element instanceof ConsoleNodeElement).forEach(root => applyTransformTree(root, visited));
+        // Repair detached/orphaned elements defensively without updating an
+        // already-visited subtree a second time.
+        ConsoleNodeElement.all.forEach(element => applyTransformTree(element, visited));
+        if (typeof Canvas !== 'undefined' && Canvas.updateView) Canvas.updateView({selection: true});
     }
 
     function refreshAllDecorations() {
@@ -2240,13 +2254,13 @@
                 this.dispatchEvent('setup', {element});
             },
             updateTransform(element) {
-                applyTransform(element);
-                updateSelectionProxy(element);
+                applyTransformTree(element);
+                subtreeElements(element).forEach(updateSelectionProxy);
                 this.dispatchEvent('update_transform', {element});
             },
             updateGeometry(element) {
                 updateElementDecoration(element);
-                applyTransform(element);
+                applyTransformTree(element);
                 this.dispatchEvent('update_geometry', {element});
             },
             updateVisibility(element) {
@@ -4387,7 +4401,9 @@
             rewritePartReference,
             referenceUsesMappedNode,
             createSelectionProxyMaterial,
-            updateSelectionProxy
+            updateSelectionProxy,
+            applyTransformTree,
+            getConsoleNodeType:() => ConsoleNodeElement
         };
     }
 

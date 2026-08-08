@@ -1,3 +1,11 @@
+## 0.3.1 - 2026-08-09 — Hierarchy Transform Hotfix
+
+- Fixed child Console nodes not following parent translation, rotation, or scale in the Blockbench viewport.
+- Transform updates now walk the hierarchy parent-first and refresh the complete affected subtree on every parent transform update.
+- Child preview objects are defensively reattached to the correct parent preview object; detached/orphaned elements are repaired during full refresh.
+- Removed redundant transform/geometry reprocessing from the final Canvas refresh, avoiding quadratic subtree work in large scenes.
+- Added a three.js r129 hierarchy regression test that verifies local child position and updated world position after moving the parent.
+
 ## 0.3.0 - 2026-08-09 — Authoring Workflow Update
 
 - Fixed Console nodes being impossible or unreliable to select from the canvas. Blockbench only raycasts `element.mesh` non-recursively, while previous Studio versions stored all visible geometry below an empty root Group.
