@@ -260,13 +260,17 @@ const tempProject = fs.mkdtempSync(path.join(os.tmpdir(), 'gfbs-console-studio-'
 const resources = path.join(tempProject, 'src', 'main', 'resources');
 const sceneDir = path.join(resources, 'data', 'gfbs_main', 'gfbs_console', 'scenes');
 const modelDir = path.join(resources, 'assets', 'minecraft', 'models', 'block');
+const textureDir = path.join(resources, 'assets', 'minecraft', 'textures', 'block');
 fs.mkdirSync(sceneDir, {recursive: true});
 fs.mkdirSync(modelDir, {recursive: true});
+fs.mkdirSync(textureDir, {recursive: true});
 fs.writeFileSync(path.join(modelDir, 'cube_all.json'), JSON.stringify({
   textures: {all: '#all'},
   elements: [{from:[0,0,0],to:[16,16,16],faces:{down:{texture:'#all'},up:{texture:'#all'},north:{texture:'#all'},south:{texture:'#all'},west:{texture:'#all'},east:{texture:'#all'}}}]
 }));
 fs.writeFileSync(path.join(modelDir, 'stone.json'), JSON.stringify({parent:'minecraft:block/cube_all', textures:{all:'minecraft:block/stone'}}));
+// TextureLoader is mocked below; it only needs bytes to prove Studio resolves a PNG data URL.
+fs.writeFileSync(path.join(textureDir, 'stone.png'), Buffer.from([0x89,0x50,0x4E,0x47,0x0D,0x0A,0x1A,0x0A]));
 const fixturePath = path.join(sceneDir, 'test.json');
 createdCodec.load(JSON.parse(JSON.stringify(fixture)), {path: fixturePath, name: 'test.json'});
 assert.strictEqual(Project.export_path, fixturePath, 'scene path is the format export path');
@@ -283,6 +287,57 @@ assert.deepStrictEqual(compiled.connections, fixture.connections);
 
 const hooks = global.__GFBSConsoleStudioTestHooks;
 assert(hooks, 'test hooks exposed');
+const refMap = new Map([['model', 'model_renamed'], ['node.with.dots', 'dotted_copy']]);
+assert.strictEqual(hooks.rewriteQualifiedReference('node.with.dots.value', refMap), 'dotted_copy.value', 'qualified references support dotted node IDs');
+assert.strictEqual(hooks.rewritePartReference('model::lamp', refMap), 'model_renamed::lamp', 'model part references are repaired');
+assert.deepStrictEqual(
+  hooks.rewriteNodeDataReferences({source:'node.with.dots.value',target:'model::lamp',target_model:'model'}, refMap),
+  {source:'dotted_copy.value',target:'model_renamed::lamp',target_model:'model_renamed'},
+  'known node-data references are repaired together'
+);
+assert.deepStrictEqual(
+  hooks.rewriteBindingReferences({source:'model.alpha',target:'$root.output'}, refMap),
+  {source:'model_renamed.alpha',target:'$root.output'},
+  'binding references are repaired without changing root addresses'
+);
+assert.deepStrictEqual(
+  hooks.rewriteConnectionReferences({from:'model.clicked',action:{type:'emit',target:'node.with.dots.changed'}}, refMap),
+  {from:'model_renamed.clicked',action:{type:'emit',target:'dotted_copy.changed'}},
+  'connection source and action target references are repaired'
+);
+
+// Blockbench 5.1.x currently embeds three.js r129. Verify the invisible root
+// proxy is genuinely raycastable and only fits direct visuals, not child nodes.
+const ThreeRuntime = require('three');
+global.THREE = ThreeRuntime;
+const proxyMesh = new ThreeRuntime.Mesh(
+  new ThreeRuntime.BoxGeometry(5, 5, 5),
+  hooks.createSelectionProxyMaterial()
+);
+proxyMesh.userData.gfbsSelectionProxy = true;
+proxyMesh.name = 'selection-proxy-test';
+proxyMesh.isElement = true;
+const ownVisual = new ThreeRuntime.Mesh(new ThreeRuntime.BoxGeometry(32, 8, 4), new ThreeRuntime.MeshBasicMaterial());
+proxyMesh.add(ownVisual);
+const foreignChildElement = new ThreeRuntime.Mesh(new ThreeRuntime.BoxGeometry(256, 256, 256), new ThreeRuntime.MeshBasicMaterial());
+foreignChildElement.isElement = true;
+foreignChildElement.name = 'another-console-node';
+proxyMesh.add(foreignChildElement);
+const selectableElement = {uuid:'selection-proxy-test',mesh:proxyMesh,gfbs_type:'gfbs_main:model',selected:false};
+hooks.updateSelectionProxy(selectableElement);
+proxyMesh.geometry.computeBoundingBox();
+const proxySize = new ThreeRuntime.Vector3();
+proxyMesh.geometry.boundingBox.getSize(proxySize);
+assert(proxySize.x > 32 && proxySize.x < 64, 'selection proxy fits direct model geometry with padding');
+assert(proxySize.y < 32, 'selection proxy excludes a huge child Console element');
+proxyMesh.updateMatrixWorld(true);
+const raycaster = new ThreeRuntime.Raycaster(new ThreeRuntime.Vector3(0,0,100), new ThreeRuntime.Vector3(0,0,-1));
+assert(raycaster.intersectObject(proxyMesh, false).length > 0, 'fully transparent selection proxy remains raycastable');
+selectableElement.selected = true;
+hooks.updateSelectionProxy(selectableElement);
+assert(proxyMesh.children.some(child => child.userData && child.userData.gfbsSelectionOutline && child.visible), 'selected node gets a visible selection outline');
+global.THREE = {};
+
 assert.strictEqual(hooks.javaLikeFormat('OUTPUT %03.0f %%', 7), 'OUTPUT 007 %', 'Java-like format preview matches scene binding use');
 let preview = hooks.resolvePreviewValues();
 assert.strictEqual(preview['$root.power'], false, 'preview defaults start from scene state');
@@ -309,6 +364,35 @@ assert(!Object.prototype.hasOwnProperty.call(compileAfterPreview, 'minecraft_ass
 const vanilla = hooks.loadVanillaModelDefinition('minecraft:stone');
 assert(Array.isArray(vanilla.elements) && vanilla.elements.length === 1, 'vanilla model parent geometry resolves from workspace assets');
 assert.strictEqual(vanilla.textures.all, 'minecraft:block/stone', 'vanilla child texture override is inherited into parent geometry');
+
+// Blockbench 5.1.x ships three.js r129. Reproduce its asynchronous TextureLoader
+// contract: load() returns a Texture before `image` is populated. The Studio face
+// texture must return that same object rather than clone it while image is undefined.
+let pendingTextureLoad = null;
+class MockVec2 { constructor(){ this.x=0; this.y=0; } set(x,y){ this.x=x; this.y=y; return this; } }
+class MockTexture {
+  constructor(){ this.image=undefined; this.repeat=new MockVec2(); this.offset=new MockVec2(); this.center=new MockVec2(); this.encoding=0; this.flipY=true; this.needsUpdate=false; this.cloneCount=0; }
+  clone(){ this.cloneCount++; const copy=new MockTexture(); copy.image=this.image; return copy; }
+}
+global.THREE.TextureLoader = class TextureLoader {
+  load(url,onLoad,onProgress,onError){
+    const texture=new MockTexture();
+    pendingTextureLoad={texture,onLoad,onError,url};
+    return texture;
+  }
+};
+global.THREE.NearestFilter = 1003;
+global.THREE.ClampToEdgeWrapping = 1001;
+global.THREE.sRGBEncoding = 3001;
+global.THREE.MathUtils = {degToRad(value){ return Number(value) * Math.PI / 180; }};
+const faceTexture = hooks.faceTexture('minecraft:block/stone', [0,0,16,16], 0);
+assert(faceTexture, 'face texture is created from resolved vanilla PNG');
+assert.strictEqual(faceTexture, pendingTextureLoad.texture, 'face material keeps the original asynchronous TextureLoader texture object');
+assert.strictEqual(faceTexture.cloneCount, 0, 'unfinished TextureLoader result is never cloned');
+assert.strictEqual(faceTexture.encoding, global.THREE.sRGBEncoding, 'three.js r129 sRGBEncoding is configured');
+pendingTextureLoad.texture.image = {width:16,height:16};
+pendingTextureLoad.onLoad(pendingTextureLoad.texture);
+assert.strictEqual(faceTexture.image.width, 16, 'the face texture receives the asynchronously decoded image');
 
 const jarPath = path.join(tempProject, 'minecraft-test.jar');
 fs.writeFileSync(jarPath, makeStoredZip({

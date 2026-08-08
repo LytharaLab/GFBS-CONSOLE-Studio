@@ -12,10 +12,13 @@
     const PLUGIN_ID = 'gfbs_console_studio';
     const FORMAT_ID = 'gfbs_console_scene';
     const CODEC_ID = 'gfbs_console_scene';
-    const VERSION = '0.2.1';
+    const VERSION = '0.3.0';
     const BB_UNITS_PER_BLOCK = 16;
     const MAX_DEPTH = 64;
     const MAX_NODES = 4096;
+    const MIN_SELECTION_PROXY_SIZE = 2.5;
+    const DEFAULT_SELECTION_PROXY_SIZE = 5;
+    const SELECTION_PROXY_PADDING = 0.75;
 
     const BUILTIN_TYPES = [
         'gfbs_main:node',
@@ -561,8 +564,137 @@
         if (!element || !element.mesh) return;
         const visible = helperShouldBeVisible(element);
         element.mesh.traverse(child => {
-            if (child.userData && child.userData.gfbsHelper) child.visible = visible;
+            if (child.userData && child.userData.gfbsSelectionOutline) child.visible = isElementSelected(element);
+            else if (child.userData && child.userData.gfbsHelper) child.visible = visible;
         });
+    }
+
+    /**
+     * Blockbench 5.x only raycasts element.mesh itself (non-recursively). GFBS
+     * previews are linked as children, so the element root must carry geometry
+     * even when that geometry is never rendered. This proxy is the canonical
+     * canvas selection target for every Console node.
+     */
+    function createSelectionProxyMaterial() {
+        const material = new THREE.MeshBasicMaterial({
+            color: 0xffffff,
+            transparent: true,
+            opacity: 0,
+            depthWrite: false,
+            side: THREE.DoubleSide
+        });
+        material.colorWrite = false;
+        material.userData = material.userData || {};
+        material.userData.gfbsSelectionMaterial = true;
+        return material;
+    }
+
+    function interactionSelectionBounds(element) {
+        const data = nodeData(element);
+        const interaction = interactionObject(data);
+        const shape = interaction && interaction.shape;
+        if (!shape || typeof shape !== 'object') return null;
+        const center = vector3(shape.center, [0, 0, 0]).map(value => value * BB_UNITS_PER_BLOCK);
+        const type = String(shape.type || 'box').toLowerCase();
+        let size;
+        if (['box', 'aabb', 'obb'].includes(type)) {
+            size = vector3(shape.size, [0.25, 0.25, 0.25]).map(value => Math.abs(value) * BB_UNITS_PER_BLOCK);
+        } else if (type === 'sphere') {
+            const diameter = Math.max(0.001, finiteNumber(shape.radius, 0.125)) * BB_UNITS_PER_BLOCK * 2;
+            size = [diameter, diameter, diameter];
+        } else if (type === 'cylinder') {
+            const diameter = Math.max(0.001, finiteNumber(shape.radius, 0.125)) * BB_UNITS_PER_BLOCK * 2;
+            const height = Math.max(0.001, finiteNumber(shape.height, 0.25)) * BB_UNITS_PER_BLOCK;
+            size = [diameter, height, diameter];
+        } else if (type === 'plane' || type === 'plane_rect') {
+            size = [
+                Math.max(0.001, finiteNumber(shape.width, 0.25)) * BB_UNITS_PER_BLOCK,
+                Math.max(0.001, finiteNumber(shape.height, 0.25)) * BB_UNITS_PER_BLOCK,
+                Math.max(0.001, finiteNumber(shape.thickness, 0.01)) * BB_UNITS_PER_BLOCK
+            ];
+        }
+        if (!size) return null;
+        const half = size.map(value => Math.max(MIN_SELECTION_PROXY_SIZE, value) / 2);
+        return new THREE.Box3(
+            new THREE.Vector3(center[0] - half[0], center[1] - half[1], center[2] - half[2]),
+            new THREE.Vector3(center[0] + half[0], center[1] + half[1], center[2] + half[2])
+        );
+    }
+
+    function directVisualSelectionBounds(element) {
+        if (!element || !element.mesh) return null;
+        element.mesh.updateMatrixWorld(true);
+        const inverseRoot = new THREE.Matrix4().copy(element.mesh.matrixWorld).invert();
+        const result = new THREE.Box3();
+        let found = false;
+        const stack = element.mesh.children.slice();
+        while (stack.length) {
+            const object = stack.pop();
+            // A Console child has its own selection proxy. Including it here would
+            // make a parent cover and steal the child's entire clickable area.
+            if (object && object.isElement && object.name !== element.uuid) continue;
+            if (!object || object.visible === false || (object.userData && object.userData.gfbsHelper)) continue;
+            if (object.geometry) {
+                if (!object.geometry.boundingBox && object.geometry.computeBoundingBox) object.geometry.computeBoundingBox();
+                if (object.geometry.boundingBox) {
+                    const localBox = object.geometry.boundingBox.clone();
+                    const toRoot = new THREE.Matrix4().multiplyMatrices(inverseRoot, object.matrixWorld);
+                    localBox.applyMatrix4(toRoot);
+                    if (!localBox.isEmpty()) {
+                        result.union(localBox);
+                        found = true;
+                    }
+                }
+            }
+            if (object.children && object.children.length) stack.push(...object.children);
+        }
+        return found ? result : null;
+    }
+
+    function updateSelectionProxy(element) {
+        const mesh = element && element.mesh;
+        if (!mesh || !mesh.userData || !mesh.userData.gfbsSelectionProxy) return;
+        let bounds = directVisualSelectionBounds(element);
+        if (!bounds && INTERACTION_TYPES.has(element.gfbs_type)) bounds = interactionSelectionBounds(element);
+        if (!bounds) {
+            const half = DEFAULT_SELECTION_PROXY_SIZE / 2;
+            bounds = new THREE.Box3(new THREE.Vector3(-half, -half, -half), new THREE.Vector3(half, half, half));
+        }
+        const size = new THREE.Vector3();
+        const center = new THREE.Vector3();
+        bounds.getSize(size);
+        bounds.getCenter(center);
+        size.set(
+            Math.max(MIN_SELECTION_PROXY_SIZE, size.x + SELECTION_PROXY_PADDING * 2),
+            Math.max(MIN_SELECTION_PROXY_SIZE, size.y + SELECTION_PROXY_PADDING * 2),
+            Math.max(MIN_SELECTION_PROXY_SIZE, size.z + SELECTION_PROXY_PADDING * 2)
+        );
+        const signature = [center.x, center.y, center.z, size.x, size.y, size.z].map(value => value.toFixed(4)).join(':');
+        if (mesh.userData.gfbsSelectionSignature !== signature) {
+            const geometry = new THREE.BoxGeometry(size.x, size.y, size.z);
+            geometry.translate(center.x, center.y, center.z);
+            if (mesh.geometry && mesh.geometry.dispose) mesh.geometry.dispose();
+            mesh.geometry = geometry;
+            mesh.userData.gfbsSelectionSignature = signature;
+        }
+        let outline = mesh.children.find(child => child.userData && child.userData.gfbsSelectionOutline);
+        if (!isElementSelected(element)) {
+            if (outline) outline.visible = false;
+            return;
+        }
+        if (!outline || outline.userData.gfbsSelectionSignature !== signature) {
+            if (outline) { mesh.remove(outline); disposeObject(outline); }
+            outline = new THREE.LineSegments(
+                new THREE.EdgesGeometry(new THREE.BoxGeometry(size.x, size.y, size.z)),
+                createWireMaterial(0.9, 0xffc247)
+            );
+            outline.position.copy(center);
+            tagHelper(outline, 'selection_outline');
+            outline.userData.gfbsSelectionOutline = true;
+            outline.userData.gfbsSelectionSignature = signature;
+            mesh.add(outline);
+        }
+        outline.visible = true;
     }
 
     // -----------------------------
@@ -1392,22 +1524,53 @@
         return texture;
     }
 
-    function baseTextureFor(resourceLocation) {
-        const key = `three:${resourceLocation}`;
-        if (previewCaches.texture.has(key)) return previewCaches.texture.get(key);
-        const dataUrl = textureResourceDataUrl(resourceLocation);
-        if (!dataUrl || !THREE.TextureLoader) return missingTexture();
-        const texture = new THREE.TextureLoader().load(dataUrl, tex => {
-            tex.needsUpdate = true;
-            if (typeof Canvas !== 'undefined' && Canvas.updateView && ConsoleNodeElement) Canvas.updateView({elements: ConsoleNodeElement.all});
-        });
+    function configureMinecraftTexture(texture) {
+        if (!texture) return texture;
         if (THREE.NearestFilter !== undefined) {
             texture.magFilter = THREE.NearestFilter;
             texture.minFilter = THREE.NearestFilter;
         }
         texture.flipY = false;
-        if (THREE.SRGBColorSpace !== undefined) texture.colorSpace = THREE.SRGBColorSpace;
-        previewCaches.texture.set(key, texture);
+        // Blockbench 5.1.x currently ships three.js r129, which predates
+        // Texture.colorSpace/SRGBColorSpace and uses Texture.encoding instead.
+        // Keep both paths so the plugin also works on newer Blockbench builds.
+        if (THREE.SRGBColorSpace !== undefined && 'colorSpace' in texture) {
+            texture.colorSpace = THREE.SRGBColorSpace;
+        } else if (THREE.sRGBEncoding !== undefined && 'encoding' in texture) {
+            texture.encoding = THREE.sRGBEncoding;
+        }
+        return texture;
+    }
+
+    function loadMinecraftFaceTexture(resourceLocation, onReady) {
+        const dataUrl = textureResourceDataUrl(resourceLocation);
+        if (!dataUrl || !THREE.TextureLoader) return missingTexture();
+        let texture = null;
+        const loader = new THREE.TextureLoader();
+        texture = loader.load(
+            dataUrl,
+            tex => {
+                configureMinecraftTexture(tex);
+                tex.needsUpdate = true;
+                if (typeof onReady === 'function') onReady(tex);
+                if (typeof Canvas !== 'undefined' && Canvas.updateView && ConsoleNodeElement) {
+                    Canvas.updateView({elements: ConsoleNodeElement.all});
+                }
+            },
+            undefined,
+            error => {
+                console.warn('[GFBS Console Studio] failed to decode vanilla texture', resourceLocation, error);
+                // Keep the returned Texture object (materials already reference it), but
+                // populate it with the synchronous missing-texture canvas so the failure
+                // is visible instead of silently degrading to a flat color.
+                try {
+                    const fallback = missingTexture();
+                    texture.image = fallback.image;
+                    texture.needsUpdate = true;
+                } catch (_) {}
+            }
+        );
+        configureMinecraftTexture(texture);
         return texture;
     }
 
@@ -1426,10 +1589,13 @@
     }
 
     function faceTexture(textureRl, uv, rotation) {
-        const base = baseTextureFor(textureRl);
-        if (!base || !base.clone) return base;
-        const texture = base.clone();
-        texture.needsUpdate = true;
+        // IMPORTANT: Do not clone a TextureLoader result before it has finished
+        // loading. Blockbench 5.1.x uses three.js r129, where Texture.clone()
+        // copies the current `image` value. TextureLoader fills `image` later, so
+        // an early clone permanently keeps `undefined` and renders as a flat
+        // material. Load one Texture object per face and mutate that same object.
+        const texture = loadMinecraftFaceTexture(textureRl);
+        if (!texture) return texture;
         texture.wrapS = texture.wrapT = THREE.ClampToEdgeWrapping;
         const u1 = finiteNumber(uv[0],0) / 16;
         const v1 = finiteNumber(uv[1],0) / 16;
@@ -1441,6 +1607,7 @@
             texture.center.set(0.5,0.5);
             texture.rotation = -THREE.MathUtils.degToRad(finiteNumber(rotation,0));
         }
+        texture.needsUpdate = true;
         return texture;
     }
 
@@ -1599,6 +1766,7 @@
         applyTransform(element);
         applyModelPreviewState(element);
         refreshHelperVisibility(element);
+        updateSelectionProxy(element);
     }
 
     function requestLinkedGltfPreview(element, source) {
@@ -1911,6 +2079,7 @@
                 const helper = createCross(1.25, 0x72d7ff); tagHelper(helper, 'spatial'); helper.visible = helperShouldBeVisible(element); element.mesh.add(helper);
             }
         }
+        updateSelectionProxy(element);
     }
 
     function applyTransform(element) {
@@ -1997,6 +2166,7 @@
                     ConsoleNodeElement.properties[key].merge(this, object || {});
                 }
                 if (object && Array.isArray(object.children)) this.children = object.children;
+                this.icon = TYPE_ICONS[this.gfbs_type] || (this.gfbs_spatial ? 'open_with' : 'account_tree');
                 this.sanitizeName();
                 return this;
             }
@@ -2054,18 +2224,24 @@
 
         new NodePreviewController(ConsoleNodeElement, {
             setup(element) {
-                const mesh = new THREE.Group();
+                const mesh = new THREE.Mesh(
+                    new THREE.BoxGeometry(DEFAULT_SELECTION_PROXY_SIZE, DEFAULT_SELECTION_PROXY_SIZE, DEFAULT_SELECTION_PROXY_SIZE),
+                    createSelectionProxyMaterial()
+                );
                 Project.nodes_3d[element.uuid] = mesh;
                 mesh.name = element.uuid;
                 mesh.type = element.type;
                 mesh.isElement = true;
+                mesh.userData.gfbsSelectionProxy = true;
                 mesh.visible = element.visibility !== false;
                 updateElementDecoration(element);
                 applyTransform(element);
+                updateSelectionProxy(element);
                 this.dispatchEvent('setup', {element});
             },
             updateTransform(element) {
                 applyTransform(element);
+                updateSelectionProxy(element);
                 this.dispatchEvent('update_transform', {element});
             },
             updateGeometry(element) {
@@ -2078,6 +2254,7 @@
             },
             updateSelection(element) {
                 if (!element.mesh) return;
+                updateSelectionProxy(element);
                 refreshHelperVisibility(element);
                 element.mesh.traverse(child => {
                     if (child.material && child.userData && child.userData.gfbsHitShape) {
@@ -2091,6 +2268,8 @@
                 if (element.mesh) {
                     clearPreviewDecorations(element);
                     if (element.mesh.parent) element.mesh.parent.remove(element.mesh);
+                    if (element.mesh.geometry && element.mesh.geometry.dispose) element.mesh.geometry.dispose();
+                    if (element.mesh.material) disposeMaterial(element.mesh.material);
                 }
                 delete Project.nodes_3d[element.uuid];
             }
@@ -2099,6 +2278,8 @@
         ConsoleNodeElement.prototype.menu = new Menu([
             'gfbs_console_edit_node',
             'gfbs_console_add_child',
+            'gfbs_console_duplicate_subtree',
+            'gfbs_console_copy_node_json',
             'gfbs_console_simulate_activate',
             'gfbs_console_simulate_interaction',
             'gfbs_console_interaction_shape',
@@ -2267,6 +2448,107 @@
         if ((state.bindings || []).length) out.bindings = clone(state.bindings);
         if ((state.connections || []).length) out.connections = clone(state.connections);
         return out;
+    }
+
+    // -----------------------------
+    // Reference-safe structural editing
+    // -----------------------------
+
+    function mappingEntries(mapping) {
+        const entries = mapping instanceof Map ? Array.from(mapping.entries()) : Object.entries(mapping || {});
+        return entries.filter(([from, to]) => from && to && from !== to).sort((a, b) => b[0].length - a[0].length);
+    }
+
+    function rewriteNodeId(value, mapping) {
+        const text = String(value == null ? '' : value);
+        const match = mappingEntries(mapping).find(([from]) => text === from);
+        return match ? match[1] : text;
+    }
+
+    function rewriteQualifiedReference(value, mapping) {
+        const text = String(value == null ? '' : value);
+        if (!text || text.startsWith('$root.')) return text;
+        for (const [from, to] of mappingEntries(mapping)) {
+            if (text.startsWith(from + '.')) return to + text.substring(from.length);
+        }
+        return text;
+    }
+
+    function rewritePartReference(value, mapping) {
+        const text = String(value == null ? '' : value);
+        for (const [from, to] of mappingEntries(mapping)) {
+            if (text.startsWith(from + '::')) return to + text.substring(from.length);
+        }
+        return text;
+    }
+
+    function rewriteNodeDataReferences(data, mapping) {
+        if (!data || typeof data !== 'object' || Array.isArray(data)) return data;
+        if (typeof data.source === 'string') data.source = rewriteQualifiedReference(data.source, mapping);
+        if (typeof data.target === 'string') {
+            data.target = data.target.includes('::')
+                ? rewritePartReference(data.target, mapping)
+                : rewriteQualifiedReference(data.target, mapping);
+        }
+        if (typeof data.target_model === 'string') data.target_model = rewriteNodeId(data.target_model, mapping);
+        return data;
+    }
+
+    function rewriteBindingReferences(binding, mapping) {
+        if (!binding || typeof binding !== 'object') return binding;
+        if (typeof binding.source === 'string') binding.source = rewriteQualifiedReference(binding.source, mapping);
+        if (typeof binding.target === 'string') binding.target = rewriteQualifiedReference(binding.target, mapping);
+        return binding;
+    }
+
+    function rewriteConnectionReferences(connection, mapping) {
+        if (!connection || typeof connection !== 'object') return connection;
+        if (typeof connection.from === 'string') connection.from = rewriteQualifiedReference(connection.from, mapping);
+        const action = connection.action;
+        if (action && typeof action === 'object' && typeof action.target === 'string') {
+            action.target = rewriteQualifiedReference(action.target, mapping);
+        }
+        return connection;
+    }
+
+    function referenceUsesMappedNode(value, mapping, partReference = false) {
+        const text = String(value == null ? '' : value);
+        return mappingEntries(mapping).some(([from]) => partReference
+            ? text.startsWith(from + '::')
+            : text === from || text.startsWith(from + '.'));
+    }
+
+    function rewriteEditorStateReferences(state, mapping) {
+        if (!state) return;
+        (state.bindings || []).forEach(binding => rewriteBindingReferences(binding, mapping));
+        (state.connections || []).forEach(connection => rewriteConnectionReferences(connection, mapping));
+        if (state.preview_values && typeof state.preview_values === 'object') {
+            const rewritten = {};
+            Object.entries(state.preview_values).forEach(([address, value]) => {
+                rewritten[rewriteQualifiedReference(address, mapping)] = value;
+            });
+            state.preview_values = rewritten;
+        }
+        if (state._resource_warnings && typeof state._resource_warnings === 'object') {
+            const warnings = {};
+            Object.entries(state._resource_warnings).forEach(([id, value]) => warnings[rewriteNodeId(id, mapping)] = value);
+            state._resource_warnings = warnings;
+        }
+        state._resolved_preview_values = null;
+        state._preview_definitions = null;
+    }
+
+    function renameNodeReferences(oldId, newId) {
+        if (!oldId || !newId || oldId === newId) return;
+        const mapping = new Map([[oldId, newId]]);
+        ConsoleNodeElement.all.forEach(candidate => {
+            let data;
+            try { data = parseJsonObject(candidate.gfbs_data_json || '{}', `Node ${candidate.name} data`); }
+            catch (_) { return; }
+            rewriteNodeDataReferences(data, mapping);
+            candidate.gfbs_data_json = pretty(data);
+        });
+        rewriteEditorStateReferences(getState(), mapping);
     }
 
     // -----------------------------
@@ -2790,20 +3072,24 @@
                         if (errors.length) throw new Error(errors.join('\n'));
                     });
 
-                    Undo.initEdit({elements: [element], outliner: true, selection: true});
+                    const oldId = element.name;
+                    Undo.initEdit({elements: ConsoleNodeElement.all.slice(), outliner: true, selection: true});
                     element.name = result.id;
                     element.gfbs_type = newType;
                     element.gfbs_spatial = SPATIAL_TYPES.has(newType) || !!result.spatial;
+                    element.icon = TYPE_ICONS[newType] || (element.gfbs_spatial ? 'open_with' : 'account_tree');
                     element.position = vector3(result.position, [0,0,0]).map(v => v * BB_UNITS_PER_BLOCK);
                     element.rotation = vector3(result.rotation, [0,0,0]);
                     element.scale = newScale;
                     element.gfbs_pivot = vector3(result.pivot, [0,0,0]);
                     element.gfbs_data_json = pretty(newData);
                     element.gfbs_properties_json = pretty(newProperties);
+                    renameNodeReferences(oldId, result.id);
                     element.updateElement();
                     updateElementDecoration(element);
                     refreshAllTransforms();
                     Undo.finishEdit('Edit GFBS console node');
+                    markDirty();
                 } catch (error) { showError(error.message); }
             }
         }).show();
@@ -2822,7 +3108,8 @@
         const name=uniqueNodeName(baseName);
         const data=options.data!==undefined?clone(options.data):defaultDataForType(type);
         const properties=options.properties!==undefined?clone(options.properties):defaultPropertiesForType(type);
-        Undo.initEdit({outliner:true,elements:[],selection:true});
+        const ownsUndo = options.noUndo !== true;
+        if (ownsUndo) Undo.initEdit({outliner:true,elements:[],selection:true});
         const element=new ConsoleNodeElement({
             name,
             gfbs_type:type,
@@ -2834,11 +3121,11 @@
             gfbs_data_json:pretty(data),
             gfbs_properties_json:pretty(properties)
         }).init().addTo(parent||getCurrentConsoleParent());
-        element.select();
+        if (options.select !== false) element.select();
         resolvePreviewValues();
         updateElementDecoration(element);
-        refreshAllTransforms();
-        Undo.finishEdit('Add GFBS console node');
+        if (options.refresh !== false) refreshAllTransforms();
+        if (ownsUndo) Undo.finishEdit('Add GFBS console node');
         if(options.openEditor!==false)openNodeEditor(element);
         return element;
     }
@@ -2906,7 +3193,13 @@
         if (type === 'gfbs_main:sound') return {sound:'gfbs_main:surroundings.ding', looping:false, streamed:false, static:false, priority:0, speed:1, min_distance:1, max_distance:64};
         if (type === 'gfbs_main:timer') return {interval:1};
         if (LAYOUT_TYPES.has(type)) return Object.assign({spacing:[0.25,0.25,0]}, type === 'gfbs_main:linear_layout' ? {} : {columns:3});
-        if (INTERACTION_TYPES.has(type)) return {interaction:{max_distance:5, shape:{type:'box', center:[0,0,0], size:[0.25,0.2,0.12]}, min:0, max:1, step:0}};
+        if (INTERACTION_TYPES.has(type)) {
+            let shape = {type:'box', center:[0,0,0], size:[0.25,0.2,0.12]};
+            if (type === 'gfbs_main:knob') shape = {type:'cylinder', center:[0,0,0], radius:0.12, height:0.1};
+            else if (type === 'gfbs_main:lever') shape = {type:'box', center:[0,0.08,0], size:[0.14,0.32,0.12]};
+            else if (type === 'gfbs_main:slider') shape = {type:'plane_rect', center:[0,0,0], width:0.12, height:0.42, thickness:0.04};
+            return {interaction:{max_distance:5, shape, min:0, max:1, step:type === 'gfbs_main:knob' || type === 'gfbs_main:slider' ? 0.05 : 0}};
+        }
         return {};
     }
 
@@ -2930,6 +3223,225 @@
             period:{type:'long', default:20, sync:false, save:true}
         };
         return {};
+    }
+
+    function subtreeElements(root) {
+        const result = [];
+        const visit = element => {
+            if (!(element instanceof ConsoleNodeElement)) return;
+            result.push(element);
+            (element.children || []).forEach(visit);
+        };
+        visit(root);
+        return result;
+    }
+
+    function uniqueNameAgainstSet(base, reserved) {
+        const clean = String(base || 'node').replace(/[^a-zA-Z0-9_.-]/g, '_').replace(/^[^a-zA-Z_]+/, 'node_');
+        let name = clean || 'node';
+        let index = 2;
+        while (reserved.has(name)) name = `${clean}_${index++}`;
+        reserved.add(name);
+        return name;
+    }
+
+    function duplicateSelectedSubtree() {
+        const sourceRoot = selectedConsoleNode();
+        if (!sourceRoot) return;
+        if (sourceRoot.parent === 'root') return showError('The Scene root cannot be duplicated. Select one of its descendants.');
+        const sources = subtreeElements(sourceRoot);
+        const sourceSet = new Set(sources.map(element => element.name));
+        const reserved = new Set(ConsoleNodeElement.all.map(element => element.name));
+        const mapping = new Map();
+        sources.forEach(element => mapping.set(element.name, uniqueNameAgainstSet(`${element.name}_copy`, reserved)));
+
+        const state = getState();
+        const oldBindings = (state.bindings || []).slice();
+        const oldConnections = (state.connections || []).slice();
+        const oldPreviewValues = Object.assign({}, state.preview_values || {});
+        Undo.initEdit({outliner:true,elements:[],selection:true});
+
+        function instantiate(source, parent, isRoot) {
+            const data = clone(nodeData(source));
+            rewriteNodeDataReferences(data, mapping);
+            const position = vector3(source.position, [0,0,0]).map(value => value / BB_UNITS_PER_BLOCK);
+            if (isRoot) position[0] += 0.25;
+            const copy = createConsoleNode(source.gfbs_type, parent, {
+                name:mapping.get(source.name),
+                data,
+                properties:clone(nodeProperties(source)),
+                position,
+                rotation:vector3(source.rotation, [0,0,0]),
+                scale:vector3(source.scale, [1,1,1]),
+                pivot:vector3(source.gfbs_pivot, [0,0,0]),
+                openEditor:false,
+                noUndo:true,
+                select:false,
+                refresh:false
+            });
+            copy.gfbs_spatial = source.gfbs_spatial;
+            copy.visibility = source.visibility !== false;
+            (source.children || []).filter(child => child instanceof ConsoleNodeElement).forEach(child => instantiate(child, copy, false));
+            return copy;
+        }
+
+        const copyRoot = instantiate(sourceRoot, sourceRoot.parent, true);
+        oldBindings.forEach(binding => {
+            if (!binding || (!referenceUsesMappedNode(binding.source, mapping) && !referenceUsesMappedNode(binding.target, mapping))) return;
+            const copied = rewriteBindingReferences(clone(binding), mapping);
+            state.bindings.push(copied);
+        });
+        oldConnections.forEach(connection => {
+            if (!connection) return;
+            const actionTarget = connection.action && connection.action.target;
+            if (!referenceUsesMappedNode(connection.from, mapping) && !referenceUsesMappedNode(actionTarget, mapping)) return;
+            state.connections.push(rewriteConnectionReferences(clone(connection), mapping));
+        });
+        Object.entries(oldPreviewValues).forEach(([address, value]) => {
+            const parsedNode = Array.from(sourceSet).some(id => address.startsWith(id + '.'));
+            if (parsedNode) state.preview_values[rewriteQualifiedReference(address, mapping)] = clone(value);
+        });
+        state._resolved_preview_values = null;
+        state._preview_definitions = null;
+        copyRoot.select();
+        refreshAllDecorations();
+        Undo.finishEdit('Duplicate GFBS console subtree');
+        markDirty();
+        showInfo(`Duplicated ${sources.length} node(s) as ${copyRoot.name}`);
+    }
+
+    function copySelectedNodeJson() {
+        const element = selectedConsoleNode();
+        if (!element) return;
+        try {
+            const text = pretty(compileNode(element, 0));
+            if (typeof Clipbench !== 'undefined' && Clipbench.setText) Clipbench.setText(text);
+            else if (typeof navigator !== 'undefined' && navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text);
+            else throw new Error('Clipboard API is unavailable in this Blockbench build');
+            showInfo(`Copied ${element.name} subtree JSON`);
+        } catch (error) { showError(error.message); }
+    }
+
+    function elementPath(element) {
+        const parts = [];
+        let current = element;
+        while (current && current !== 'root') {
+            if (current instanceof ConsoleNodeElement) parts.unshift(current.name);
+            current = current.parent;
+        }
+        return parts.join(' / ');
+    }
+
+    function focusConsoleNode(element) {
+        if (!element) return;
+        let parent = element.parent;
+        while (parent && parent !== 'root') {
+            parent.isOpen = true;
+            parent = parent.parent;
+        }
+        element.select();
+        if (typeof Canvas !== 'undefined' && Canvas.updateView) {
+            Canvas.updateView({elements:[element], selection:true, element_aspects:{transform:true,geometry:true}});
+        }
+        refreshHelperVisibility(element);
+        showInfo(`Selected ${element.name}`);
+    }
+
+    function showNodeFinder() {
+        const nodes = ConsoleNodeElement.all.slice().sort((a,b) => elementPath(a).localeCompare(elementPath(b)));
+        if (!nodes.length) return showInfo('Scene contains no Console nodes');
+        const options = {};
+        nodes.forEach(element => options[element.uuid] = `${elementPath(element)}  [${element.gfbs_type.replace('gfbs_main:', '')}]`);
+        new Dialog({
+            id:'gfbs_console_node_finder',
+            title:'Find / Select Console Node',
+            width:720,
+            form:{node:{label:'Node',type:'select',options,value:nodes[0].uuid}},
+            onConfirm(result){focusConsoleNode(nodes.find(element => element.uuid === result.node));}
+        }).show();
+    }
+
+    function showSceneOverview() {
+        const nodes = ConsoleNodeElement.all.slice();
+        const state = getState();
+        const byType = {};
+        nodes.forEach(element => byType[element.gfbs_type] = (byType[element.gfbs_type] || 0) + 1);
+        const validation = validateCurrentScene(false);
+        const warnings = state._resource_warnings ? Object.entries(state._resource_warnings) : [];
+        const detail = [
+            'NODE TYPES',
+            ...Object.entries(byType).sort((a,b) => a[0].localeCompare(b[0])).map(([type,count]) => `${String(count).padStart(4)}  ${type}`),
+            '',
+            `Bindings: ${state.bindings.length}`,
+            `Connections: ${state.connections.length}`,
+            `Scene properties: ${Object.keys(state.properties || {}).length}`,
+            `Preview overrides: ${Object.keys(state.preview_values || {}).length}`,
+            `Unresolved preview resources: ${warnings.length}`,
+            '',
+            validation.errors.length ? 'ERRORS' : '',
+            ...validation.errors.slice(0, 30),
+            validation.warnings.length ? 'WARNINGS' : '',
+            ...validation.warnings.slice(0, 30)
+        ].filter((line, index, array) => line !== '' || (index > 0 && array[index - 1] !== ''));
+        Blockbench.showMessageBox({
+            title:'GFBS Scene Overview',
+            icon:validation.errors.length ? 'error' : validation.warnings.length ? 'warning' : 'check_circle',
+            message:`${nodes.length} nodes · ${validation.errors.length} errors · ${validation.warnings.length} warnings`,
+            detail:detail.join('\n')
+        });
+    }
+
+    function uniqueRootPropertyName(base) {
+        const properties = getState().properties || {};
+        let name = base;
+        let index = 2;
+        while (Object.prototype.hasOwnProperty.call(properties, name)) name = `${base}_${index++}`;
+        return name;
+    }
+
+    function createStarterConsoleTemplate() {
+        const state = getState();
+        const parent = getCurrentConsoleParent();
+        const powerProperty = uniqueRootPropertyName('power');
+        const outputProperty = uniqueRootPropertyName('output');
+        Undo.initEdit({outliner:true,elements:[],selection:true});
+        const common = {openEditor:false,noUndo:true,select:false,refresh:false};
+        const assembly = createConsoleNode('gfbs_main:node_3d', parent, Object.assign({name:'console_assembly'}, common));
+        const panel = createConsoleNode('gfbs_main:model', assembly, Object.assign({
+            name:'panel',
+            data:{
+                source:{adapter:'gfbs_main:vanilla_json',location:'minecraft:polished_deepslate'},
+                parts:{whole:'/'},
+                material_profiles:{
+                    off:{shading:'pbr',color:[0.35,0.35,0.35,1],fullbright:false,visible:true},
+                    on:{shading:'pbr',color:[0.25,1,0.35,1],fullbright:true,visible:true}
+                }
+            },
+            scale:[1.5,0.12,0.75]
+        }, common));
+        const label = createConsoleNode('gfbs_main:text', assembly, Object.assign({name:'status_label',position:[0,0.18,0.39],data:{text:'OUTPUT 000',pixel_scale:0.0045}}, common));
+        const row = createConsoleNode('gfbs_main:linear_layout', assembly, Object.assign({name:'controls',position:[-0.45,0,0.42],data:{spacing:[0.3,0,0]}}, common));
+        const button = createConsoleNode('gfbs_main:button', row, Object.assign({name:'action_button'}, common));
+        const toggle = createConsoleNode('gfbs_main:toggle', row, Object.assign({name:'power_toggle'}, common));
+        const knob = createConsoleNode('gfbs_main:knob', row, Object.assign({name:'output_knob'}, common));
+        createConsoleNode('gfbs_main:slider', row, Object.assign({name:'trim_slider'}, common));
+        createConsoleNode('gfbs_main:indicator', assembly, Object.assign({
+            name:'power_indicator',
+            data:{source:`$root.${powerProperty}`,target:`${panel.name}::whole`,states:{false:'off',true:'on'}}
+        }, common));
+        state.properties[powerProperty] = {type:'boolean',default:false,sync:true,save:true};
+        state.properties[outputProperty] = {type:'double',default:0,sync:true,save:true,interpolate:true};
+        state.bindings.push({source:`${toggle.name}.state`,target:`$root.${powerProperty}`});
+        state.bindings.push({source:`${knob.name}.value`,target:`$root.${outputProperty}`,range:{input_min:0,input_max:1,output_min:0,output_max:100}});
+        state.bindings.push({source:`$root.${outputProperty}`,target:`${label.name}.text`,format:'OUTPUT %03.0f'});
+        state.connections.push({from:`${button.name}.activated`,action:{type:'toggle',target:`$root.${powerProperty}`}});
+        state._resolved_preview_values = null;
+        state._preview_definitions = null;
+        assembly.select();
+        refreshAllDecorations();
+        Undo.finishEdit('Create GFBS starter console');
+        markDirty();
+        showInfo(`Created starter console assembly (${assembly.name})`);
     }
 
     function manageProperties(root) {
@@ -3351,7 +3863,7 @@
         const includeGeometry=root=>{
             if(!root||!root.traverse)return;
             root.traverse(object=>{
-                if(!object||object.visible===false||!object.geometry)return;
+                if(!object||object.visible===false||!object.geometry||(object.userData&&object.userData.gfbsSelectionProxy))return;
                 if(object.userData&&object.userData.gfbsHelper)return;
                 const objectBox=new THREE.Box3().setFromObject(object);
                 if(!objectBox.isEmpty()){box.union(objectBox);found=true;}
@@ -3635,6 +4147,26 @@
         clearPreviewCaches(); refreshAllDecorations(); showInfo(`Added resource root: ${normalized}`);
     }
 
+    function manageResourceRoots(){
+        const state=getState();
+        state.resource_roots=Array.isArray(state.resource_roots)?state.resource_roots:[];
+        if(!state.resource_roots.length){addResourceRoot();return;}
+        const options={}; state.resource_roots.forEach((root,index)=>options[String(index)]=`${index+1}. ${root}`);
+        new Dialog({id:'gfbs_console_resource_roots',title:'Manage Resource Roots',width:720,form:{
+            root:{label:'Resource Root',type:'select',options,value:'0'},
+            operation:{label:'Operation',type:'select',options:{remove:'Remove',up:'Move Up',down:'Move Down',clear:'Clear All'},value:'remove'}
+        },onConfirm(result){
+            const index=Math.max(0,Math.min(state.resource_roots.length-1,Number(result.root)||0));
+            if(result.operation==='clear')state.resource_roots=[];
+            else if(result.operation==='remove')state.resource_roots.splice(index,1);
+            else if(result.operation==='up'&&index>0)[state.resource_roots[index-1],state.resource_roots[index]]=[state.resource_roots[index],state.resource_roots[index-1]];
+            else if(result.operation==='down'&&index<state.resource_roots.length-1)[state.resource_roots[index+1],state.resource_roots[index]]=[state.resource_roots[index],state.resource_roots[index+1]];
+            saveGlobalSettings({resource_roots:state.resource_roots.slice()});
+            clearPreviewCaches(); refreshAllDecorations();
+            showInfo(`${state.resource_roots.length} resource root(s) active`);
+        }}).show();
+    }
+
     function showResourceSources(){
         const sources=resourceSources();
         const state=getState();
@@ -3723,15 +4255,30 @@
         registerAction('gfbs_console_save_as',{name:'Export GFBS Scene JSON...',icon:'save_as',condition:isConsoleProject,click:saveSceneAs},'file.export');
 
         registerAction('gfbs_console_add_node',{name:'Add GFBS Console Node...',icon:'add',condition:isConsoleProject,click:()=>addNode(null,null)},'edit');
-        registerAction('gfbs_console_add_child',{name:'Add Child Console Node...',icon:'add_box',condition:isConsoleProject,click:()=>addNode(selectedConsoleNode()||'root',null)});
+        registerAction('gfbs_console_add_child',{name:'Add Child Console Node...',icon:'add_box',condition:isConsoleProject,click:()=>addNode(getCurrentConsoleParent(),null)});
         registerAction('gfbs_console_add_vanilla_model',{name:'Add Minecraft / Vanilla Model...',icon:'view_in_ar',condition:isConsoleProject,click:quickAddVanillaModel});
         registerAction('gfbs_console_add_gltf_model',{name:'Add GFBS glTF Model...',icon:'deployed_code',condition:isConsoleProject,click:quickAddGltfModel});
         registerAction('gfbs_console_add_text',{name:'Add Text...',icon:'text_fields',condition:isConsoleProject,click:quickAddText});
         registerAction('gfbs_console_add_button',{name:'Add Button...',icon:'radio_button_checked',condition:isConsoleProject,click:()=>quickAddControl('gfbs_main:button')});
         registerAction('gfbs_console_add_toggle',{name:'Add Toggle...',icon:'toggle_on',condition:isConsoleProject,click:()=>quickAddControl('gfbs_main:toggle')});
+        registerAction('gfbs_console_add_knob',{name:'Add Knob...',icon:'tune',condition:isConsoleProject,click:()=>quickAddControl('gfbs_main:knob')});
+        registerAction('gfbs_console_add_lever',{name:'Add Lever...',icon:'vertical_align_center',condition:isConsoleProject,click:()=>quickAddControl('gfbs_main:lever')});
+        registerAction('gfbs_console_add_slider',{name:'Add Slider...',icon:'linear_scale',condition:isConsoleProject,click:()=>quickAddControl('gfbs_main:slider')});
+        registerAction('gfbs_console_add_indicator',{name:'Add Indicator...',icon:'lightbulb',condition:isConsoleProject,click:()=>createConsoleNode('gfbs_main:indicator',null)});
+        registerAction('gfbs_console_add_animation',{name:'Add Animation Driver...',icon:'animation',condition:isConsoleProject,click:()=>createConsoleNode('gfbs_main:animation',null)});
+        registerAction('gfbs_console_add_sound',{name:'Add Sound Node...',icon:'volume_up',condition:isConsoleProject,click:()=>createConsoleNode('gfbs_main:sound',null)});
+        registerAction('gfbs_console_add_timer',{name:'Add Timer...',icon:'timer',condition:isConsoleProject,click:()=>createConsoleNode('gfbs_main:timer',null)});
+        registerAction('gfbs_console_add_linear_layout',{name:'Add Linear Layout...',icon:'view_week',condition:isConsoleProject,click:()=>createConsoleNode('gfbs_main:linear_layout',null)});
+        registerAction('gfbs_console_add_grid_layout',{name:'Add Grid Layout...',icon:'grid_view',condition:isConsoleProject,click:()=>createConsoleNode('gfbs_main:grid_layout',null)});
+        registerAction('gfbs_console_add_surface_layout',{name:'Add Surface Layout...',icon:'dashboard',condition:isConsoleProject,click:()=>createConsoleNode('gfbs_main:surface_layout',null)});
         registerAction('gfbs_console_add_empty',{name:'Add Empty Node3D...',icon:'open_with',condition:isConsoleProject,click:()=>createConsoleNode('gfbs_main:node_3d',null)});
+        registerAction('gfbs_console_starter_template',{name:'Create Starter Console Assembly',icon:'dashboard_customize',condition:isConsoleProject,click:createStarterConsoleTemplate});
 
         registerAction('gfbs_console_edit_node',{name:'Edit GFBS Console Node...',icon:'edit',condition:isConsoleProject,click:()=>openNodeEditor(selectedConsoleNode())});
+        registerAction('gfbs_console_duplicate_subtree',{name:'Duplicate Subtree (Repair References)',icon:'content_copy',condition:isConsoleProject,click:duplicateSelectedSubtree});
+        registerAction('gfbs_console_copy_node_json',{name:'Copy Selected Subtree JSON',icon:'data_object',condition:isConsoleProject,click:copySelectedNodeJson});
+        registerAction('gfbs_console_find_node',{name:'Find / Select Node...',icon:'search',condition:isConsoleProject,click:showNodeFinder});
+        registerAction('gfbs_console_overview',{name:'Scene Overview / Preflight',icon:'analytics',condition:isConsoleProject,click:showSceneOverview});
         registerAction('gfbs_console_simulate_activate',{name:'Simulate ACTIVATE',icon:'play_arrow',condition:isConsoleProject,click:simulateSelectedActivate});
         registerAction('gfbs_console_simulate_interaction',{name:'Simulate Interaction...',icon:'touch_app',condition:isConsoleProject,click:simulateSelectedInteraction});
         registerAction('gfbs_console_scene_properties',{name:'Scene Properties...',icon:'data_object',condition:isConsoleProject,click:()=>manageProperties(true)});
@@ -3755,17 +4302,46 @@
         registerAction('gfbs_console_mc_jar',{name:'Set Minecraft Client JAR...',icon:'inventory_2',condition:isConsoleProject,click:setMinecraftClientJar});
         registerAction('gfbs_console_mc_auto',{name:'Auto-detect Minecraft 1.20.1 Assets',icon:'travel_explore',condition:isConsoleProject,click:autoDetectMinecraftAssets});
         registerAction('gfbs_console_resource_root',{name:'Add Resource Pack / Resource Root...',icon:'create_new_folder',condition:isConsoleProject,click:addResourceRoot});
+        registerAction('gfbs_console_manage_resource_roots',{name:'Manage Resource Roots...',icon:'folder_managed',condition:isConsoleProject,click:manageResourceRoots});
         registerAction('gfbs_console_resource_status',{name:'Show Active Resource Sources',icon:'source',condition:isConsoleProject,click:showResourceSources});
         registerAction('gfbs_console_reload_previews',{name:'Reload All Model / Texture Previews',icon:'refresh',condition:isConsoleProject,click:()=>{clearPreviewCaches();refreshAllDecorations();showInfo('GFBS visual previews reloaded');}});
         registerAction('gfbs_console_validate',{name:'Validate Scene',icon:'fact_check',condition:isConsoleProject,click:()=>validateCurrentScene(true)});
 
+        const createMenu=new Menu('gfbs_console_create_menu',[
+            'gfbs_console_starter_template','_',
+            'gfbs_console_add_vanilla_model','gfbs_console_add_gltf_model','gfbs_console_add_text','_',
+            'gfbs_console_add_button','gfbs_console_add_toggle','gfbs_console_add_knob','gfbs_console_add_lever','gfbs_console_add_slider','_',
+            'gfbs_console_add_indicator','gfbs_console_add_animation','gfbs_console_add_sound','gfbs_console_add_timer','_',
+            'gfbs_console_add_linear_layout','gfbs_console_add_grid_layout','gfbs_console_add_surface_layout','gfbs_console_add_empty','gfbs_console_add_node'
+        ]);
+        registerAction('gfbs_console_create_menu_action',{name:'Create / Add',icon:'add_box',condition:isConsoleProject,children:createMenu.structure});
+        const structureMenu=new Menu('gfbs_console_structure_menu',[
+            'gfbs_console_edit_node','gfbs_console_duplicate_subtree','gfbs_console_copy_node_json','gfbs_console_find_node'
+        ]);
+        registerAction('gfbs_console_structure_menu_action',{name:'Navigate / Structure',icon:'account_tree',condition:isConsoleProject,children:structureMenu.structure});
+        const logicMenu=new Menu('gfbs_console_logic_menu',[
+            'gfbs_console_scene_properties','gfbs_console_node_properties','gfbs_console_bindings','gfbs_console_connections'
+        ]);
+        registerAction('gfbs_console_logic_menu_action',{name:'Properties / Logic',icon:'schema',condition:isConsoleProject,children:logicMenu.structure});
+        const previewMenu=new Menu('gfbs_console_preview_menu',[
+            'gfbs_console_view_render','gfbs_console_view_authoring','gfbs_console_view_debug','_',
+            'gfbs_console_preview_state','gfbs_console_preview_snapshot','_',
+            'gfbs_console_simulate_activate','gfbs_console_simulate_interaction'
+        ]);
+        registerAction('gfbs_console_preview_menu_action',{name:'Preview / Simulate',icon:'play_circle',condition:isConsoleProject,children:previewMenu.structure});
+        const nodeToolsMenu=new Menu('gfbs_console_node_tools_menu',[
+            'gfbs_console_interaction_shape','gfbs_console_fit_hitbox','gfbs_console_indicator_states','gfbs_console_model_parts','gfbs_console_material_profiles'
+        ]);
+        registerAction('gfbs_console_node_tools_menu_action',{name:'Node Tools',icon:'construction',condition:isConsoleProject,children:nodeToolsMenu.structure});
+        const resourcesMenu=new Menu('gfbs_console_resources_menu',[
+            'gfbs_console_workspace','gfbs_console_mc_auto','gfbs_console_mc_assets_dir','gfbs_console_mc_jar','_',
+            'gfbs_console_resource_root','gfbs_console_manage_resource_roots','gfbs_console_resource_status','gfbs_console_reload_previews'
+        ]);
+        registerAction('gfbs_console_resources_menu_action',{name:'Workspace / Resources',icon:'source',condition:isConsoleProject,children:resourcesMenu.structure});
         const menu=new Menu('gfbs_console_menu',[
-            'gfbs_console_add_vanilla_model','gfbs_console_add_gltf_model','gfbs_console_add_text','gfbs_console_add_button','gfbs_console_add_toggle','gfbs_console_add_empty','gfbs_console_add_node','_',
-            'gfbs_console_edit_node','gfbs_console_scene_properties','gfbs_console_node_properties','gfbs_console_bindings','gfbs_console_connections','_',
-            'gfbs_console_view_render','gfbs_console_view_authoring','gfbs_console_view_debug','gfbs_console_preview_state','gfbs_console_preview_snapshot','_',
-            'gfbs_console_interaction_shape','gfbs_console_fit_hitbox','gfbs_console_indicator_states','gfbs_console_model_parts','gfbs_console_material_profiles','_',
-            'gfbs_console_workspace','gfbs_console_mc_auto','gfbs_console_mc_assets_dir','gfbs_console_mc_jar','gfbs_console_resource_root','gfbs_console_resource_status','gfbs_console_reload_previews','_',
-            'gfbs_console_validate'
+            'gfbs_console_create_menu_action','gfbs_console_structure_menu_action','gfbs_console_logic_menu_action',
+            'gfbs_console_preview_menu_action','gfbs_console_node_tools_menu_action','gfbs_console_resources_menu_action','_',
+            'gfbs_console_overview','gfbs_console_validate'
         ]);
         registerAction('gfbs_console_menu_action',{name:'GFBS 3D-CONSOLE Studio',icon:'developer_board',condition:isConsoleProject,children:menu.structure},'tools');
     }
@@ -3801,7 +4377,17 @@
             clearPreviewCaches,
             buildApproximateVanillaBlockPreview,
             approximateBlockColor,
-            ensureLocalMinecraftAssetSource
+            ensureLocalMinecraftAssetSource,
+            faceTexture,
+            configureMinecraftTexture,
+            rewriteNodeDataReferences,
+            rewriteBindingReferences,
+            rewriteConnectionReferences,
+            rewriteQualifiedReference,
+            rewritePartReference,
+            referenceUsesMappedNode,
+            createSelectionProxyMaterial,
+            updateSelectionProxy
         };
     }
 

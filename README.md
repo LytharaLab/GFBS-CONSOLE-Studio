@@ -1,4 +1,4 @@
-# GFBS 3D-CONSOLE Studio 0.2.1
+# GFBS 3D-CONSOLE Studio 0.3.0
 
 **GFBS 3D-CONSOLE Studio** 是 LytharaLab 为 GFBS-Main / 3D-CONSOLE 制作的 Blockbench Desktop 可视化 Scene 编辑器。
 
@@ -10,7 +10,23 @@ data/<namespace>/gfbs_console/scenes/*.json
 
 GFBS Scene JSON 始终是 source of truth；不会要求 `.bbmodel` 中间格式。
 
-0.2.0 的目标不再只是“把 JSON 画成一堆代理框”，而是让 Blockbench 真正承担 **3D-CONSOLE Scene Visual Editor / Studio** 的职责：真实模型预览、干净 Render View、交互调试、Preview Runtime、Binding/Indicator/Material 状态预览，以及结构化逻辑编辑。
+0.3.0 把 Studio 从“能编辑 Scene”推进到更完整的 **3D-CONSOLE 制作工作台**：修复画布节点拾取，加入引用安全的重命名/复制、节点导航、预检总览、完整快捷创建项、资源根管理，以及能直接运行 Preview Runtime 的 Starter Console Assembly。
+
+## 0.3 核心升级
+
+- **所有节点都能从画布选中**：每个 Console 节点拥有不可见的拾取代理；模型、文字会按实际内容自动贴合，Interaction 按 hit shape 贴合，纯逻辑节点也保留稳定点击范围。
+- **不会再由父节点吞掉子节点选择**：父级代理只计算自己的直接视觉内容，不包围整棵子树。
+- **清晰的选中反馈**：Render / Authoring / Debug 三种视图中，当前节点都有轻量琥珀色选择框。
+- **引用安全重命名**：改 Node ID 时同步更新 Indicator、Animation、Binding、Connection、Preview Override 与资源诊断引用；支持 ID 内含 `.`。
+- **引用安全复制子树**：自动生成全局唯一 ID，重写内部引用，并复制相关 Binding / Connection / Preview Override。
+- **Find / Select Node**：通过完整 Outliner 路径与节点类型快速定位节点。
+- **Scene Overview / Preflight**：集中查看节点类型统计、逻辑图规模、资源缺失与保存前错误。
+- **Starter Console Assembly**：一键生成 Panel、Text、Button、Toggle、Knob、Slider、Indicator、Property、Binding 与 Connection 相互连通的示例骨架。
+- **完整快捷创建**：补齐 Knob、Lever、Slider、Indicator、Animation、Sound、Timer、Linear/Grid/Surface Layout。
+- **Resource Roots 可管理**：除了添加，还能删除、清空和调整优先级。
+- **节点类型图标**：Outliner 使用对应的 Model、Text、Sound、Control、Layout 等图标，复杂场景更易读。
+
+Studio 让 Blockbench 真正承担 **3D-CONSOLE Scene Visual Editor / Studio** 的职责：真实模型预览、干净 Render View、交互调试、Preview Runtime、Binding/Indicator/Material 状态预览，以及结构化逻辑编辑。
 
 ## 运行要求
 
@@ -27,7 +43,7 @@ GFBS Scene JSON 始终是 source of truth；不会要求 `.bbmodel` 中间格式
 1. 打开 Blockbench Desktop。
 2. **File → Plugins...**。
 3. 选择 **Load Plugin from File**。
-4. 选择 `dist/gfbs_console_studio.js`，或发布包根目录的 `gfbs_console_studio.js`。
+4. 选择 `dist/gfbs_console_studio.js`。
 5. 安装后会出现 **GFBS 3D-CONSOLE Scene** 格式和 **Tools → GFBS 3D-CONSOLE Studio** 菜单。
 
 ## 打开 Scene
@@ -332,7 +348,7 @@ Simulate Interaction...
 
 # 快速添加
 
-0.2.0 不再把“Add Node”的默认项设为一个不可见 `node_3d`。
+通用 “Add Node” 默认选择 `gfbs_main:model`，同时提供按用途组织的快捷创建项。
 
 菜单提供：
 
@@ -342,11 +358,21 @@ Add GFBS glTF Model...
 Add Text...
 Add Button...
 Add Toggle...
+Add Knob...
+Add Lever...
+Add Slider...
+Add Indicator...
+Add Animation Driver...
+Add Sound Node...
+Add Timer...
+Add Linear Layout...
+Add Grid Layout...
+Add Surface Layout...
 Add Empty Node3D...
 Add GFBS Console Node...
 ```
 
-通用 Add Node 默认选择 `gfbs_main:model`。
+`Create Starter Console Assembly` 会一次生成一套已连通的控制台示例，可直接用 Preview Runtime 和 Interaction Simulation 检查 Toggle、Knob、Indicator、Text、Binding 与 Connection。
 
 例如创建一块石头：
 
@@ -388,7 +414,10 @@ Resource: minecraft:stone
 - position / rotation / scale / pivot
 - GFBS XYZ Euler order
 - layout preview offset
-- node duplication / rename / reparent（Blockbench Outliner）
+- 引用安全的 node rename / subtree duplication
+- subtree JSON 一键复制到剪贴板
+- reparent（Blockbench Outliner）
+- Find / Select Node 路径导航
 
 # Properties / Logic
 
@@ -480,6 +509,8 @@ Resource: minecraft:stone
 ```text
 Tools → GFBS 3D-CONSOLE Studio → Validate Scene
 ```
+
+`Scene Overview / Preflight` 还会把节点类型数量、Binding / Connection 数量、Preview Override、资源缺失及前 30 项校验结果合并显示，适合发布前快速扫一遍。
 
 # 典型工作流
 
