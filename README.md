@@ -1,4 +1,4 @@
-# GFBS 3D-CONSOLE Studio 0.2.0
+# GFBS 3D-CONSOLE Studio 0.2.1
 
 **GFBS 3D-CONSOLE Studio** 是 LytharaLab 为 GFBS-Main / 3D-CONSOLE 制作的 Blockbench Desktop 可视化 Scene 编辑器。
 

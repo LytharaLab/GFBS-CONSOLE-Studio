@@ -318,6 +318,8 @@ fs.writeFileSync(jarPath, makeStoredZip({
 assert.strictEqual(hooks.readZipEntry(jarPath, 'assets/minecraft/models/block/jar_only.json').toString('utf8').includes('cube_all'), true, 'Minecraft JAR/ZIP resource reader works');
 hooks.getState().minecraft_asset_source = jarPath;
 hooks.clearPreviewCaches();
+assert(hooks.ensureLocalMinecraftAssetSource(), 'a usable Minecraft asset source is resolved');
+assert.strictEqual(hooks.approximateBlockColor('minecraft:white_concrete'), 0xe8e8e8, 'asset-less block fallback uses readable approximate block colors');
 const jarModel = hooks.loadVanillaModelDefinition('minecraft:jar_only');
 assert(Array.isArray(jarModel.elements) && jarModel.elements.length === 1, 'vanilla model can inherit geometry directly from a selected Minecraft JAR');
 

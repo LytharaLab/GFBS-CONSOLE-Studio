@@ -12,7 +12,7 @@
     const PLUGIN_ID = 'gfbs_console_studio';
     const FORMAT_ID = 'gfbs_console_scene';
     const CODEC_ID = 'gfbs_console_scene';
-    const VERSION = '0.2.0';
+    const VERSION = '0.2.1';
     const BB_UNITS_PER_BLOCK = 16;
     const MAX_DEPTH = 64;
     const MAX_NODES = 4096;
@@ -86,6 +86,9 @@
     const nodeRequire = typeof require === 'function' ? require : null;
     const fs = nodeRequire ? safeRequire('fs') : null;
     const path = nodeRequire ? safeRequire('path') : null;
+    const os = nodeRequire ? safeRequire('os') : null;
+
+    const GLOBAL_SETTINGS_KEY = 'gfbs_console_studio.global.v1';
 
     function safeRequire(name) {
         try { return nodeRequire(name); } catch (_) { return null; }
@@ -166,7 +169,28 @@
         return typeof Format !== 'undefined' && Format && Format.id === FORMAT_ID;
     }
 
+    function loadGlobalSettings() {
+        try {
+            if (typeof localStorage === 'undefined') return {};
+            const raw = localStorage.getItem(GLOBAL_SETTINGS_KEY);
+            const parsed = raw ? JSON.parse(raw) : {};
+            return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+        } catch (_) {
+            return {};
+        }
+    }
+
+    function saveGlobalSettings(patch) {
+        try {
+            if (typeof localStorage === 'undefined') return;
+            const current = loadGlobalSettings();
+            const next = Object.assign({}, current, patch || {});
+            localStorage.setItem(GLOBAL_SETTINGS_KEY, JSON.stringify(next));
+        } catch (_) {}
+    }
+
     function defaultState() {
+        const globalSettings = loadGlobalSettings();
         return {
             format_version: 1,
             properties: {},
@@ -177,8 +201,10 @@
             source_path: null,
             preview_mode: 'render',
             preview_values: {},
-            resource_roots: [],
-            minecraft_asset_source: null,
+            resource_roots: Array.isArray(globalSettings.resource_roots) ? globalSettings.resource_roots.slice() : [],
+            minecraft_asset_source: typeof globalSettings.minecraft_asset_source === 'string' ? globalSettings.minecraft_asset_source : null,
+            _asset_prompted: false,
+            _resource_warnings: {},
             _resolved_preview_values: null,
             _preview_definitions: null
         };
@@ -289,6 +315,7 @@
 
     function clearPreviewCaches() {
         linkedPreviewCache.clear();
+        autoMinecraftCandidatesCache = null;
         for (const value of previewCaches.texture.values()) {
             if (value && typeof value === 'object' && value.isTexture && value.dispose) {
                 try { value.dispose(); } catch (_) {}
@@ -958,31 +985,160 @@
         return null;
     }
 
+    function scanMinecraftJarCandidates(root, maxDepth = 7, maxEntries = 5000) {
+        if (!root || !fs || !path || !fs.existsSync(root)) return [];
+        const found = [];
+        const queue = [{dir: root, depth: 0}];
+        let visited = 0;
+        while (queue.length && visited < maxEntries) {
+            const {dir, depth} = queue.shift();
+            let entries;
+            try { entries = fs.readdirSync(dir, {withFileTypes: true}); }
+            catch (_) { continue; }
+            visited += entries.length;
+            for (const entry of entries) {
+                const full = path.join(dir, entry.name);
+                if (entry.isDirectory()) {
+                    if (depth < maxDepth && !['node_modules','.git','logs','crash-reports','saves','screenshots'].includes(entry.name)) {
+                        queue.push({dir: full, depth: depth + 1});
+                    }
+                    continue;
+                }
+                if (!entry.isFile() || !entry.name.toLowerCase().endsWith('.jar')) continue;
+                const normalized = full.replace(/\\/g, '/').toLowerCase();
+                if (normalized.includes('1.20.1')) found.push(full);
+            }
+        }
+        return found;
+    }
+
+    function isMinecraftClientAssetArchive(candidate) {
+        if (!candidate || !fs || !fs.existsSync(candidate)) return false;
+        try {
+            if (!fs.statSync(candidate).isFile()) return false;
+            const directory = zipDirectory(candidate);
+            return !!(directory && directory.entries && directory.entries.has('assets/minecraft/models/block/cube_all.json'));
+        } catch (_) { return false; }
+    }
+
     function autoMinecraftAssetCandidates() {
         if (autoMinecraftCandidatesCache) return autoMinecraftCandidatesCache.slice();
         if (!path || !fs || typeof process === 'undefined') return [];
-        const home = process.env.USERPROFILE || process.env.HOME || '';
+        const home = process.env.USERPROFILE || process.env.HOME || (os && os.homedir ? os.homedir() : '') || '';
         const appData = process.env.APPDATA || '';
+        const localAppData = process.env.LOCALAPPDATA || '';
         const candidates = [];
-        if (appData) candidates.push(path.join(appData, '.minecraft', 'versions', '1.20.1', '1.20.1.jar'));
-        if (home) {
-            candidates.push(path.join(home, '.minecraft', 'versions', '1.20.1', '1.20.1.jar'));
-            const fg = path.join(home, '.gradle', 'caches', 'forge_gradle', 'minecraft_user_repo', 'net', 'minecraft', 'client');
-            if (fs.existsSync(fg)) {
-                try {
-                    const versions = fs.readdirSync(fg).filter(name => name.startsWith('1.20.1'));
-                    versions.forEach(version => {
-                        const dir = path.join(fg, version);
-                        if (!fs.statSync(dir).isDirectory()) return;
-                        fs.readdirSync(dir).filter(name => name.endsWith('.jar')).forEach(name => candidates.push(path.join(dir, name)));
-                    });
-                } catch (_) {}
-            }
+        const direct = [
+            appData && path.join(appData, '.minecraft', 'versions', '1.20.1', '1.20.1.jar'),
+            home && path.join(home, '.minecraft', 'versions', '1.20.1', '1.20.1.jar'),
+            home && path.join(home, 'curseforge', 'minecraft', 'Install', 'versions', '1.20.1', '1.20.1.jar')
+        ].filter(Boolean);
+        candidates.push(...direct);
+
+        const scanRoots = [
+            appData && path.join(appData, '.minecraft', 'versions'),
+            home && path.join(home, '.minecraft', 'versions'),
+            appData && path.join(appData, 'PrismLauncher', 'libraries', 'com', 'mojang', 'minecraft'),
+            appData && path.join(appData, 'MultiMC', 'libraries', 'com', 'mojang', 'minecraft'),
+            localAppData && path.join(localAppData, 'PrismLauncher', 'libraries', 'com', 'mojang', 'minecraft'),
+            home && path.join(home, 'curseforge', 'minecraft', 'Install', 'versions'),
+            home && path.join(home, '.gradle', 'caches', 'forge_gradle', 'minecraft_user_repo', 'net', 'minecraft'),
+            home && path.join(home, '.gradle', 'caches', 'modules-2', 'files-2.1', 'net.minecraft')
+        ].filter(Boolean);
+        for (const root of scanRoots) candidates.push(...scanMinecraftJarCandidates(root));
+
+        // A ForgeGradle project may expose a local cache or run tree near the workspace.
+        const state = getState(false);
+        if (state && state.workspace_root) {
+            const workspaceRoots = [
+                path.join(state.workspace_root, '.gradle'),
+                path.join(state.workspace_root, 'run'),
+                path.dirname(state.workspace_root)
+            ];
+            for (const root of workspaceRoots) candidates.push(...scanMinecraftJarCandidates(root, 4, 1500));
         }
-        autoMinecraftCandidatesCache = [...new Set(candidates.filter(candidate => {
+
+        const unique = [...new Set(candidates.filter(candidate => {
             try { return fs.existsSync(candidate) && fs.statSync(candidate).isFile(); } catch (_) { return false; }
         }))];
+        // Validate before exposing a candidate as a resource source. This avoids mapped/
+        // slim ForgeGradle jars that contain classes but no vanilla assets.
+        autoMinecraftCandidatesCache = unique.filter(isMinecraftClientAssetArchive);
         return autoMinecraftCandidatesCache.slice();
+    }
+
+    function ensureLocalMinecraftAssetSource() {
+        const state = getState();
+        if (!state) return null;
+        const projectResources = resourcesRoot();
+        if (projectResources && fs && fs.existsSync(path.join(projectResources, 'assets', 'minecraft'))) return projectResources;
+        for (const root of (state.resource_roots || [])) {
+            const normalized = normalizeResourceDirectory(root);
+            if (normalized && fs && fs.existsSync(path.join(normalized, 'assets', 'minecraft'))) return normalized;
+        }
+        const selected = state.minecraft_asset_source;
+        if (selected && fs && fs.existsSync(selected)) {
+            try {
+                if (fs.statSync(selected).isDirectory()) {
+                    const normalized = normalizeResourceDirectory(selected);
+                    if (normalized && fs.existsSync(path.join(normalized, 'assets', 'minecraft'))) return selected;
+                } else if (isMinecraftClientAssetArchive(selected)) {
+                    return selected;
+                }
+            } catch (_) {}
+        }
+        const detected = autoMinecraftAssetCandidates()[0] || null;
+        if (detected) {
+            state.minecraft_asset_source = detected;
+            saveGlobalSettings({minecraft_asset_source: detected});
+            return detected;
+        }
+        return null;
+    }
+
+    function hasMinecraftAssetResources() {
+        if (!fs || !path) return false;
+        for (const source of resourceSources()) {
+            try {
+                if (source.kind === 'dir' && fs.existsSync(path.join(source.root, 'assets', 'minecraft', 'models', 'block', 'cube_all.json'))) return true;
+                if (source.kind === 'zip') {
+                    const directory = zipDirectory(source.root);
+                    if (directory && directory.entries.has('assets/minecraft/models/block/cube_all.json')) return true;
+                }
+            } catch (_) {}
+        }
+        return false;
+    }
+
+    function minecraftVanillaNodeCount() {
+        if (!ConsoleNodeElement || !ConsoleNodeElement.all) return 0;
+        return ConsoleNodeElement.all.filter(element => {
+            if (element.gfbs_type !== 'gfbs_main:model') return false;
+            const source = nodeData(element).source || {};
+            return source.adapter === 'gfbs_main:vanilla_json' && String(source.location || '').startsWith('minecraft:');
+        }).length;
+    }
+
+    function maybePromptForMinecraftAssets() {
+        const state = getState(false);
+        if (!state || state._asset_prompted || hasMinecraftAssetResources()) return;
+        const count = minecraftVanillaNodeCount();
+        if (!count) return;
+        state._asset_prompted = true;
+        Blockbench.showMessageBox({
+            id:'gfbs_console_missing_mc_assets',
+            title:'Minecraft 1.20.1 Preview Assets Not Found',
+            message:`This scene uses ${count} minecraft: vanilla model node(s). Studio is currently using approximate solid-block previews so the scene stays spatially readable.`,
+            detail:'For exact vanilla model geometry and textures, let Studio search local Minecraft/ForgeGradle installations or select a Minecraft 1.20.1 client JAR.',
+            commands:{
+                auto:'Search Local Minecraft / ForgeGradle',
+                jar:'Select Minecraft 1.20.1 Client JAR',
+                approximate:'Continue With Approximate Preview'
+            }
+        }, result => {
+            if (result === 'auto') autoDetectMinecraftAssets();
+            else if (result === 'jar') setMinecraftClientJar();
+        });
     }
 
     function resourceSources() {
@@ -1345,6 +1501,55 @@
         return mesh;
     }
 
+    function approximateBlockColor(resourceLocation) {
+        const rl = parseResourceLocation(resourceLocation);
+        const id = rl ? rl.path.toLowerCase() : String(resourceLocation || '').toLowerCase();
+        const named = [
+            ['black',0x171717],['light_gray',0x9d9d97],['gray',0x55595d],['white',0xe8e8e8],
+            ['red',0xb53a32],['orange',0xe87820],['yellow',0xf0c83e],['lime',0x70b52c],
+            ['green',0x4b7e2f],['cyan',0x2b8b8b],['light_blue',0x5aa6d8],['blue',0x3d55a5],
+            ['purple',0x7b45a0],['magenta',0xb44aa3],['pink',0xd98499],['brown',0x79543a]
+        ];
+        for (const [name,color] of named) if (id.includes(name)) return color;
+        if (id.includes('iron')) return 0xd7d7d7;
+        if (id.includes('gold')) return 0xf4ca43;
+        if (id.includes('redstone')) return 0x9f1717;
+        if (id.includes('deepslate')) return 0x4c4c50;
+        if (id.includes('stone')) return 0x7e7e7e;
+        return 0x6d737a;
+    }
+
+    function buildApproximateVanillaBlockPreview(resourceLocation) {
+        const rl = parseResourceLocation(resourceLocation);
+        // A bare registry-like block id is very commonly a full cube in 3D-CONSOLE
+        // authoring. This fallback preserves spatial composition when Minecraft assets
+        // are unavailable; it is explicitly marked approximate and never serialized.
+        if (!rl || rl.path.includes('/')) return null;
+        const material = new THREE.MeshStandardMaterial({
+            color: approximateBlockColor(resourceLocation), roughness: 0.92, metalness: 0.0
+        });
+        const mesh = new THREE.Mesh(new THREE.BoxGeometry(16,16,16), material);
+        mesh.position.set(8,8,8);
+        mesh.name = `approx_${rl.path}`;
+        const root = new THREE.Group();
+        root.name = resourceLocation;
+        root.userData.gfbsApproximateVanilla = true;
+        root.add(mesh);
+        return {scene: root, animations: [], approximate: true};
+    }
+
+    function noteResourceWarning(element, message) {
+        const state = getState();
+        if (!state) return;
+        state._resource_warnings = state._resource_warnings || {};
+        if (element && element.name) state._resource_warnings[element.name] = String(message || 'Unresolved resource');
+    }
+
+    function clearResourceWarning(element) {
+        const state = getState();
+        if (state && state._resource_warnings && element && element.name) delete state._resource_warnings[element.name];
+    }
+
     function loadVanillaPreview(resourceLocation) {
         const model = loadVanillaModelDefinition(resourceLocation);
         const root = new THREE.Group();
@@ -1402,6 +1607,7 @@
         if (!filePath || !fs.existsSync(filePath)) {
             const marker = createMissingModelMarker(element, `glTF not found: ${source.location}`);
             if (marker) { marker.userData.gfbsMissingModel = true; element.mesh.add(marker); }
+            noteResourceWarning(element, `glTF not found: ${source.location}`);
             console.warn('[GFBS Console Studio] glTF resource not found', source.location, filePath);
             return;
         }
@@ -1419,6 +1625,7 @@
             }
             promise.then(asset => {
                 if (!element.mesh || element._gfbsPreviewToken !== token) return;
+                clearResourceWarning(element);
                 attachLinkedModel(element, asset, BB_UNITS_PER_BLOCK, source.location);
             }).catch(error => {
                 console.warn('[GFBS Console Studio] Blockbench GLTFLoader preview failed', filePath, error);
@@ -1443,11 +1650,19 @@
                 previewCaches.vanilla.set(cacheKey, asset);
             }
             if (!element.mesh || element._gfbsPreviewToken !== token) return;
+            clearResourceWarning(element);
             attachLinkedModel(element, asset, 1, source.location);
         } catch (error) {
             console.warn('[GFBS Console Studio] vanilla model preview failed', source.location, error);
-            const marker = createMissingModelMarker(element, error.message);
-            if (marker) { marker.userData.gfbsMissingModel = true; element.mesh.add(marker); }
+            noteResourceWarning(element, error.message);
+            const approximate = buildApproximateVanillaBlockPreview(source.location);
+            if (approximate) {
+                attachLinkedModel(element, approximate, 1, `${source.location} [approximate]`);
+                element._gfbsApproximatePreview = true;
+            } else if (previewMode() !== VIEW_MODE_RENDER) {
+                const marker = createMissingModelMarker(element, error.message);
+                if (marker) { marker.userData.gfbsMissingModel = true; element.mesh.add(marker); }
+            }
         }
     }
 
@@ -1983,6 +2198,8 @@
         state.preview_values = {};
         state._resolved_preview_values = null;
         state._preview_definitions = null;
+        state._resource_warnings = {};
+        ensureLocalMinecraftAssetSource();
 
         createElementFromNode(json.root, 'root', 0, new Set());
         Project.name = filePath && path ? path.basename(filePath, path.extname(filePath)) : (Project.name || 'console_scene');
@@ -1994,6 +2211,7 @@
         }
         setTimeout(() => {
             refreshAllDecorations();
+            maybePromptForMinecraftAssets();
             const validation = validateCurrentScene(false);
             if (validation.errors.length) showError(`Loaded with ${validation.errors.length} validation error(s)`, validation.errors.join('\n'));
         }, 0);
@@ -3382,7 +3600,7 @@
         if(!chosen)return;
         const normalized=normalizeResourceDirectory(chosen);
         if(!normalized||!fs.existsSync(path.join(normalized,'assets','minecraft')))return showError('Selected directory does not contain assets/minecraft');
-        const state=getState(); state.minecraft_asset_source=normalized; clearPreviewCaches(); refreshAllDecorations(); showInfo(`Minecraft assets: ${normalized}`);
+        const state=getState(); state.minecraft_asset_source=normalized; saveGlobalSettings({minecraft_asset_source:normalized}); clearPreviewCaches(); refreshAllDecorations(); showInfo(`Minecraft assets: ${normalized}`);
     }
 
     function setMinecraftClientJar(){
@@ -3391,20 +3609,17 @@
             try{
                 const directory=zipDirectory(file.path);
                 if(!directory||!directory.entries.has('assets/minecraft/models/block/cube_all.json'))throw new Error('The selected archive does not look like a Minecraft client/resource JAR');
-                const state=getState(); state.minecraft_asset_source=file.path; clearPreviewCaches(); refreshAllDecorations(); showInfo(`Minecraft JAR: ${path.basename(file.path)}`);
+                const state=getState(); state.minecraft_asset_source=file.path; saveGlobalSettings({minecraft_asset_source:file.path}); clearPreviewCaches(); refreshAllDecorations(); showInfo(`Minecraft JAR: ${path.basename(file.path)}`);
             }catch(error){showError(error.message);}
         });
     }
 
     function autoDetectMinecraftAssets(){
+        autoMinecraftCandidatesCache = null;
         const candidates=autoMinecraftAssetCandidates();
-        if(!candidates.length)return showError('No Minecraft 1.20.1 client JAR was auto-detected. Use “Set Minecraft Client JAR...” instead.');
-        let selected=null;
-        for(const candidate of candidates){
-            try{const directory=zipDirectory(candidate);if(directory&&directory.entries.has('assets/minecraft/models/block/cube_all.json')){selected=candidate;break;}}catch(_){}
-        }
-        if(!selected)return showError('Minecraft/Forge JAR candidates were found, but none contained vanilla model assets. Select the real client JAR manually.');
-        const state=getState(); state.minecraft_asset_source=selected; clearPreviewCaches(); refreshAllDecorations(); showInfo(`Auto-detected ${path.basename(selected)}`);
+        if(!candidates.length)return showError('No local Minecraft 1.20.1 client asset JAR was found. Studio will keep using approximate block previews; use “Set Minecraft Client JAR...” for exact vanilla textures.');
+        const selected=candidates[0];
+        const state=getState(); state.minecraft_asset_source=selected; saveGlobalSettings({minecraft_asset_source:selected}); clearPreviewCaches(); refreshAllDecorations(); showInfo(`Auto-detected Minecraft assets: ${path.basename(selected)}`);
     }
 
     function addResourceRoot(){
@@ -3416,15 +3631,19 @@
         const state=getState();
         state.resource_roots=Array.isArray(state.resource_roots)?state.resource_roots:[];
         if(!state.resource_roots.includes(normalized))state.resource_roots.push(normalized);
+        saveGlobalSettings({resource_roots:state.resource_roots.slice()});
         clearPreviewCaches(); refreshAllDecorations(); showInfo(`Added resource root: ${normalized}`);
     }
 
     function showResourceSources(){
         const sources=resourceSources();
+        const state=getState();
+        const warnings=state&&state._resource_warnings?Object.entries(state._resource_warnings):[];
         Blockbench.showMessageBox({
             title:'GFBS Resource Sources',
-            message:`${sources.length} active resource source(s)`,
-            detail:sources.map((source,index)=>`${index+1}. ${source.kind.toUpperCase()} ${source.root}${source.auto?'  [auto]':''}`).join('\n') || 'No resource sources configured.'
+            message:`${sources.length} active resource source(s); ${warnings.length} unresolved preview resource(s)`,
+            detail:(sources.map((source,index)=>`${index+1}. ${source.kind.toUpperCase()} ${source.root}${source.auto?'  [auto]':''}`).join('\n') || 'No resource sources configured.')
+                + (warnings.length?'\n\nUNRESOLVED / APPROXIMATE:\n'+warnings.map(([node,msg])=>`${node}: ${msg}`).join('\n'):'')
         });
     }
 
@@ -3579,7 +3798,10 @@
             modelResourceCandidates,
             readZipEntry,
             previewMappingKey,
-            clearPreviewCaches
+            clearPreviewCaches,
+            buildApproximateVanillaBlockPreview,
+            approximateBlockColor,
+            ensureLocalMinecraftAssetSource
         };
     }
 
