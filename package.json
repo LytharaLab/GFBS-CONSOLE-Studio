@@ -1,0 +1,11 @@
+{
+  "name": "gfbs-console-studio",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Blockbench visual editor for GFBS-Main 3D-CONSOLE scene JSON",
+  "scripts": {
+    "check": "node --check dist/gfbs_console_studio.js",
+    "test": "node --check dist/gfbs_console_studio.js && node test/roundtrip-smoke.js"
+  },
+  "license": "MIT"
+}
