@@ -1,4 +1,4 @@
-# GFBS 3D-CONSOLE Studio 0.3.1
+# GFBS 3D-CONSOLE Studio 0.3.2
 
 **GFBS 3D-CONSOLE Studio** 是 LytharaLab 为 GFBS-Main / 3D-CONSOLE 制作的 Blockbench Desktop 可视化 Scene 编辑器。
 
@@ -16,6 +16,7 @@ GFBS Scene JSON 始终是 source of truth；不会要求 `.bbmodel` 中间格式
 
 - **所有节点都能从画布选中**：每个 Console 节点拥有不可见的拾取代理；模型、文字会按实际内容自动贴合，Interaction 按 hit shape 贴合，纯逻辑节点也保留稳定点击范围。
 - **父子 Transform 真正联动**：移动、旋转或缩放父节点时，整个子树即时跟随，同时继续以局部 Transform 写回 Scene JSON。
+- **Console 节点可真正收纳子节点**：`node_3d` 等 Console 节点现在会被 Blockbench 识别为 Outliner 父节点，可直接把 `model`、`text` 等节点拖入；右键或 Structure 菜单另有 **Move to Console Parent...**，支持多选、循环检测和保持世界 Transform。
 - **不会再由父节点吞掉子节点选择**：父级代理只计算自己的直接视觉内容，不包围整棵子树。
 - **清晰的选中反馈**：Render / Authoring / Debug 三种视图中，当前节点都有轻量琥珀色选择框。
 - **引用安全重命名**：改 Node ID 时同步更新 Indicator、Animation、Binding、Connection、Preview Override 与资源诊断引用；支持 ID 内含 `.`。
@@ -26,6 +27,8 @@ GFBS Scene JSON 始终是 source of truth；不会要求 `.bbmodel` 中间格式
 - **完整快捷创建**：补齐 Knob、Lever、Slider、Indicator、Animation、Sound、Timer、Linear/Grid/Surface Layout。
 - **Resource Roots 可管理**：除了添加，还能删除、清空和调整优先级。
 - **节点类型图标**：Outliner 使用对应的 Model、Text、Sound、Control、Layout 等图标，复杂场景更易读。
+
+> Blockbench 自带的 **Move to Group / 移动至分组** 只面向原生 Group，不负责 GFBS Scene 节点。0.3.2 已从 Console 节点菜单移除这个误导入口，请使用拖放或 **Move to Console Parent...**。
 
 Studio 让 Blockbench 真正承担 **3D-CONSOLE Scene Visual Editor / Studio** 的职责：真实模型预览、干净 Render View、交互调试、Preview Runtime、Binding/Indicator/Material 状态预览，以及结构化逻辑编辑。
 

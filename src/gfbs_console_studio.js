@@ -12,7 +12,7 @@
     const PLUGIN_ID = 'gfbs_console_studio';
     const FORMAT_ID = 'gfbs_console_scene';
     const CODEC_ID = 'gfbs_console_scene';
-    const VERSION = '0.3.1';
+    const VERSION = '0.3.2';
     const BB_UNITS_PER_BLOCK = 16;
     const MAX_DEPTH = 64;
     const MAX_NODES = 4096;
@@ -2217,6 +2217,10 @@
             parent: true,
             child_types: ['gfbs_console_node']
         };
+        // OutlinerElement inherits a static `isParent = false` flag. Blockbench's
+        // Outliner UI uses that class-level capability when it decides whether a
+        // custom element should render/behave as an expandable drop target.
+        ConsoleNodeElement.isParent = true;
         ConsoleNodeElement.prototype.type = 'gfbs_console_node';
         ConsoleNodeElement.prototype.title = 'GFBS Console Node';
         ConsoleNodeElement.prototype.icon = 'account_tree';
@@ -2292,6 +2296,7 @@
         ConsoleNodeElement.prototype.menu = new Menu([
             'gfbs_console_edit_node',
             'gfbs_console_add_child',
+            'gfbs_console_move_to_parent',
             'gfbs_console_duplicate_subtree',
             'gfbs_console_copy_node_json',
             'gfbs_console_simulate_activate',
@@ -2301,8 +2306,6 @@
             'gfbs_console_indicator_states',
             'gfbs_console_model_parts',
             'gfbs_console_material_profiles',
-            '_',
-            ...Outliner.control_menu_group,
             '_',
             'rename',
             'delete'
@@ -3248,6 +3251,134 @@
         };
         visit(root);
         return result;
+    }
+
+    function isConsoleDescendantOf(element, ancestor) {
+        let parent = element && element.parent;
+        const visited = new Set();
+        while (parent && parent !== 'root' && !visited.has(parent)) {
+            if (parent === ancestor) return true;
+            visited.add(parent);
+            parent = parent.parent;
+        }
+        return false;
+    }
+
+    function selectedConsoleNodesForMove() {
+        const selected = (Outliner.selected || []).filter(element => element instanceof ConsoleNodeElement);
+        return selected.filter(element => !selected.some(candidate => candidate !== element && isConsoleDescendantOf(element, candidate)));
+    }
+
+    function consoleReparentError(elements, target) {
+        if (!Array.isArray(elements) || !elements.length) return 'Select one or more GFBS Console nodes first.';
+        if (!(target instanceof ConsoleNodeElement)) return 'Choose a valid GFBS Console parent node.';
+        if (elements.some(element => !(element instanceof ConsoleNodeElement))) return 'Only GFBS Console nodes can be moved by this command.';
+        if (elements.some(element => element.parent === 'root')) return 'The Scene root cannot be moved below another node.';
+        if (elements.some(element => element === target || isConsoleDescendantOf(target, element))) return 'A node cannot be moved below itself or one of its descendants.';
+        return null;
+    }
+
+    function setElementTransformFromLocalMatrix(element, matrix) {
+        const localPosition = new THREE.Vector3();
+        const quaternion = new THREE.Quaternion();
+        const scale = new THREE.Vector3();
+        matrix.decompose(localPosition, quaternion, scale);
+        const euler = new THREE.Euler().setFromQuaternion(quaternion, 'XYZ');
+        const pivot = vector3(element.gfbs_pivot, [0,0,0]);
+        const pivotVector = new THREE.Vector3(
+            pivot[0] * BB_UNITS_PER_BLOCK,
+            pivot[1] * BB_UNITS_PER_BLOCK,
+            pivot[2] * BB_UNITS_PER_BLOCK
+        );
+        const transformedPivot = pivotVector.clone().multiply(scale).applyQuaternion(quaternion);
+        const layout = layoutOffsetFor(element);
+        localPosition
+            .sub(new THREE.Vector3(layout[0], layout[1], layout[2]).multiplyScalar(BB_UNITS_PER_BLOCK))
+            .sub(pivotVector)
+            .add(transformedPivot);
+        element.position = localPosition.toArray();
+        element.rotation = [euler.x, euler.y, euler.z].map(value => THREE.MathUtils.radToDeg(value));
+        element.scale = scale.toArray();
+    }
+
+    function reparentConsoleNodes(elements, target, preserveWorld = true) {
+        const error = consoleReparentError(elements, target);
+        if (error) throw new Error(error);
+        const moved = elements.filter(element => element.parent !== target);
+        if (!moved.length) return [];
+
+        const worldMatrices = new Map();
+        if (preserveWorld) {
+            moved.forEach(element => {
+                if (!element.mesh) return;
+                element.mesh.updateMatrixWorld(true);
+                worldMatrices.set(element, element.mesh.matrixWorld.clone());
+            });
+        }
+
+        moved.forEach(element => element.addTo(target));
+        target.isOpen = true;
+        if (target.mesh) target.mesh.updateMatrixWorld(true);
+
+        if (preserveWorld && target.mesh) {
+            const inverseParentWorld = target.mesh.matrixWorld.clone().invert();
+            moved.forEach(element => {
+                const worldMatrix = worldMatrices.get(element);
+                if (!worldMatrix) return;
+                const localMatrix = inverseParentWorld.clone().multiply(worldMatrix);
+                setElementTransformFromLocalMatrix(element, localMatrix);
+            });
+        }
+        moved.forEach(element => applyTransformTree(element));
+        return moved;
+    }
+
+    function moveSelectedConsoleNodes() {
+        const selected = selectedConsoleNodesForMove();
+        if (!selected.length) return showInfo('Select one or more GFBS Console nodes first');
+        if (selected.some(element => element.parent === 'root')) return showError('The Scene root cannot be moved. Select one of its descendants.');
+
+        const excluded = new Set();
+        selected.forEach(element => subtreeElements(element).forEach(child => excluded.add(child)));
+        const targets = ConsoleNodeElement.all
+            .filter(element => !excluded.has(element))
+            .sort((a,b) => elementPath(a).localeCompare(elementPath(b)));
+        if (!targets.length) return showError('No valid Console parent is available for this selection.');
+        const options = {};
+        targets.forEach(element => options[element.uuid] = elementPath(element));
+        const sharedParent = selected.every(element => element.parent === selected[0].parent) && selected[0].parent instanceof ConsoleNodeElement
+            ? selected[0].parent : null;
+        const initialTarget = sharedParent && options[sharedParent.uuid] ? sharedParent.uuid : targets[0].uuid;
+
+        new Dialog({
+            id:'gfbs_console_move_to_parent_dialog',
+            title:selected.length === 1 ? `Move ${selected[0].name} to Console Parent` : `Move ${selected.length} Console Nodes`,
+            width:680,
+            form:{
+                target:{label:'Parent Console Node',type:'select',options,value:initialTarget},
+                preserve_world:{label:'Keep Current World Transform',type:'checkbox',value:true},
+                transform_note:{label:'Transform',type:'info',text:'Enabled keeps the node visually in place and recalculates its local transform. Disable it to keep the existing local transform relative to the new parent.'}
+            },
+            onConfirm(result) {
+                const target = targets.find(element => element.uuid === result.target);
+                const validationError = consoleReparentError(selected, target);
+                if (validationError) return showError(validationError);
+                const candidates = selected.filter(element => element.parent !== target);
+                if (!candidates.length) return showInfo('The selected node is already under that parent');
+                Undo.initEdit({outliner:true,elements:candidates,selection:true});
+                try {
+                    const moved = reparentConsoleNodes(candidates, target, !!result.preserve_world);
+                    Undo.finishEdit(moved.length === 1 ? 'Move Console node' : 'Move Console nodes');
+                    if (target.updateElement) target.updateElement();
+                    refreshAllTransforms();
+                    markDirty();
+                    showInfo(`Moved ${moved.length} node${moved.length === 1 ? '' : 's'} under ${target.name}`);
+                } catch (error) {
+                    if (Undo.cancelEdit) Undo.cancelEdit();
+                    showError(error.message);
+                }
+            }
+        }).show();
     }
 
     function uniqueNameAgainstSet(base, reserved) {
@@ -4289,6 +4420,7 @@
         registerAction('gfbs_console_starter_template',{name:'Create Starter Console Assembly',icon:'dashboard_customize',condition:isConsoleProject,click:createStarterConsoleTemplate});
 
         registerAction('gfbs_console_edit_node',{name:'Edit GFBS Console Node...',icon:'edit',condition:isConsoleProject,click:()=>openNodeEditor(selectedConsoleNode())});
+        registerAction('gfbs_console_move_to_parent',{name:'Move to Console Parent...',icon:'drive_file_move',condition:isConsoleProject,click:moveSelectedConsoleNodes});
         registerAction('gfbs_console_duplicate_subtree',{name:'Duplicate Subtree (Repair References)',icon:'content_copy',condition:isConsoleProject,click:duplicateSelectedSubtree});
         registerAction('gfbs_console_copy_node_json',{name:'Copy Selected Subtree JSON',icon:'data_object',condition:isConsoleProject,click:copySelectedNodeJson});
         registerAction('gfbs_console_find_node',{name:'Find / Select Node...',icon:'search',condition:isConsoleProject,click:showNodeFinder});
@@ -4330,7 +4462,7 @@
         ]);
         registerAction('gfbs_console_create_menu_action',{name:'Create / Add',icon:'add_box',condition:isConsoleProject,children:createMenu.structure});
         const structureMenu=new Menu('gfbs_console_structure_menu',[
-            'gfbs_console_edit_node','gfbs_console_duplicate_subtree','gfbs_console_copy_node_json','gfbs_console_find_node'
+            'gfbs_console_edit_node','gfbs_console_move_to_parent','gfbs_console_duplicate_subtree','gfbs_console_copy_node_json','gfbs_console_find_node'
         ]);
         registerAction('gfbs_console_structure_menu_action',{name:'Navigate / Structure',icon:'account_tree',condition:isConsoleProject,children:structureMenu.structure});
         const logicMenu=new Menu('gfbs_console_logic_menu',[
@@ -4403,6 +4535,9 @@
             createSelectionProxyMaterial,
             updateSelectionProxy,
             applyTransformTree,
+            isConsoleDescendantOf,
+            consoleReparentError,
+            reparentConsoleNodes,
             getConsoleNodeType:() => ConsoleNodeElement
         };
     }

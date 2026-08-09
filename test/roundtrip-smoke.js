@@ -338,6 +338,7 @@ hooks.updateSelectionProxy(selectableElement);
 assert(proxyMesh.children.some(child => child.userData && child.userData.gfbsSelectionOutline && child.visible), 'selected node gets a visible selection outline');
 
 const ConsoleNodeType = hooks.getConsoleNodeType();
+assert.strictEqual(ConsoleNodeType.isParent, true, 'Console element type advertises itself as an Outliner parent/drop target');
 const parentNode = Object.assign(Object.create(ConsoleNodeType.prototype), {
   uuid:'parent-transform-test',name:'parent',gfbs_type:'gfbs_main:node_3d',gfbs_spatial:true,
   position:[16,0,0],rotation:[0,0,0],scale:[1,1,1],gfbs_pivot:[0,0,0],children:[],parent:'root'
@@ -362,6 +363,33 @@ parentNode.position = [32,0,0];
 hooks.applyTransformTree(parentNode);
 childMesh.getWorldPosition(childWorld);
 assert.deepStrictEqual(childWorld.toArray().map(Math.round), [32,16,0], 'moving a parent updates the child world transform');
+
+const targetNode = Object.assign(Object.create(ConsoleNodeType.prototype), {
+  uuid:'reparent-target-test',name:'node_3d',gfbs_type:'gfbs_main:node_3d',gfbs_spatial:true,
+  position:[0,0,16],rotation:[0,0,0],scale:[1,1,1],gfbs_pivot:[0,0,0],children:[],parent:parentNode
+});
+const modelNode = Object.assign(Object.create(ConsoleNodeType.prototype), {
+  uuid:'reparent-model-test',name:'model',gfbs_type:'gfbs_main:model',gfbs_spatial:true,
+  position:[16,0,0],rotation:[0,0,0],scale:[1,1,1],gfbs_pivot:[0,0,0],children:[],parent:parentNode
+});
+parentNode.children.push(targetNode, modelNode);
+const targetMesh = new ThreeRuntime.Group();
+const modelMesh = new ThreeRuntime.Group();
+Object.defineProperty(targetNode,'mesh',{value:targetMesh,configurable:true});
+Object.defineProperty(modelNode,'mesh',{value:modelMesh,configurable:true});
+hooks.applyTransformTree(parentNode);
+const beforeReparent = new ThreeRuntime.Vector3();
+modelMesh.getWorldPosition(beforeReparent);
+const movedNodes = hooks.reparentConsoleNodes([modelNode], targetNode, true);
+const afterReparent = new ThreeRuntime.Vector3();
+modelMesh.getWorldPosition(afterReparent);
+assert.strictEqual(movedNodes.length, 1, 'Console reparent operation moves the requested node');
+assert.strictEqual(modelNode.parent, targetNode, 'model is assigned to the Console node parent');
+assert(targetNode.children.includes(modelNode), 'new Console parent owns the moved model in its children array');
+assert(!parentNode.children.includes(modelNode), 'model is removed from the old parent children array');
+assert(beforeReparent.distanceTo(afterReparent) < 1e-6, 'optional world-transform preservation prevents visual jumping while reparenting');
+assert.strictEqual(hooks.isConsoleDescendantOf(modelNode, targetNode), true, 'reparented hierarchy is discoverable through ancestry');
+assert.match(hooks.consoleReparentError([targetNode], modelNode), /descendants/, 'cycle-producing reparent is rejected');
 global.THREE = {};
 
 assert.strictEqual(hooks.javaLikeFormat('OUTPUT %03.0f %%', 7), 'OUTPUT 007 %', 'Java-like format preview matches scene binding use');

@@ -1,3 +1,11 @@
+## 0.3.2 - 2026-08-09 — Console Reparenting Hotfix
+
+- Fixed `model`, `text`, and other Console nodes not becoming children when dropped onto a `node_3d` or other Console node in the Outliner.
+- Console nodes now explicitly advertise Blockbench's class-level parent/drop-target capability in addition to their existing parent behavior and child-type rules.
+- Added **Move to Console Parent...** to the node context menu and Navigate / Structure menu, with multi-selection, cycle prevention, Scene-root protection, and an optional keep-world-transform mode.
+- Removed Blockbench's native Group-only controls from the Console-node context menu so **Move to Group** is no longer presented as if it could target GFBS nodes.
+- Added regression coverage for parent/drop-target registration, direct hierarchy mutation, old-parent cleanup, cycle rejection, and world-transform preservation.
+
 ## 0.3.1 - 2026-08-09 — Hierarchy Transform Hotfix
 
 - Fixed child Console nodes not following parent translation, rotation, or scale in the Blockbench viewport.

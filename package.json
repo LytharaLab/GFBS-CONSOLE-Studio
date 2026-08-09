@@ -1,6 +1,6 @@
 {
   "name": "gfbs-console-studio",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "private": true,
   "description": "Blockbench visual scene editor and preview runtime for GFBS-Main 3D-CONSOLE",
   "main": "dist/gfbs_console_studio.js",
