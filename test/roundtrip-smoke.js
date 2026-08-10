@@ -2,7 +2,18 @@ const assert = require('assert');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const crypto = require('crypto');
+const {createCanvas, Image: CanvasImage} = require('@napi-rs/canvas');
 process.env.GFBS_CONSOLE_STUDIO_TEST = '1';
+
+global.Image = CanvasImage;
+global.document = {
+  createElement(tag) {
+    if (tag === 'canvas') return createCanvas(1, 1);
+    if (tag === 'img') return new CanvasImage();
+    throw new Error(`Unsupported test DOM element: ${tag}`);
+  }
+};
 
 
 function makeStoredZip(entries) {
@@ -261,9 +272,11 @@ const resources = path.join(tempProject, 'src', 'main', 'resources');
 const sceneDir = path.join(resources, 'data', 'gfbs_main', 'gfbs_console', 'scenes');
 const modelDir = path.join(resources, 'assets', 'minecraft', 'models', 'block');
 const textureDir = path.join(resources, 'assets', 'minecraft', 'textures', 'block');
+const fontDir = path.join(resources, 'assets', 'minecraft', 'font');
 fs.mkdirSync(sceneDir, {recursive: true});
 fs.mkdirSync(modelDir, {recursive: true});
 fs.mkdirSync(textureDir, {recursive: true});
+fs.mkdirSync(path.join(fontDir, 'include'), {recursive: true});
 fs.writeFileSync(path.join(modelDir, 'cube_all.json'), JSON.stringify({
   textures: {all: '#all'},
   elements: [{from:[0,0,0],to:[16,16,16],faces:{down:{texture:'#all'},up:{texture:'#all'},north:{texture:'#all'},south:{texture:'#all'},west:{texture:'#all'},east:{texture:'#all'}}}]
@@ -271,6 +284,23 @@ fs.writeFileSync(path.join(modelDir, 'cube_all.json'), JSON.stringify({
 fs.writeFileSync(path.join(modelDir, 'stone.json'), JSON.stringify({parent:'minecraft:block/cube_all', textures:{all:'minecraft:block/stone'}}));
 // TextureLoader is mocked below; it only needs bytes to prove Studio resolves a PNG data URL.
 fs.writeFileSync(path.join(textureDir, 'stone.png'), Buffer.from([0x89,0x50,0x4E,0x47,0x0D,0x0A,0x1A,0x0A]));
+fs.writeFileSync(path.join(fontDir, 'default.json'), JSON.stringify({providers: [
+  {type:'reference', id:'minecraft:include/space'},
+  {type:'reference', id:'minecraft:include/default'},
+  {type:'reference', id:'minecraft:include/unifont'}
+]}));
+fs.writeFileSync(path.join(fontDir, 'include', 'space.json'), JSON.stringify({providers: [
+  {type:'space', advances:{' ':4}}
+]}));
+fs.writeFileSync(path.join(fontDir, 'include', 'default.json'), JSON.stringify({providers: [
+  {type:'bitmap', file:'minecraft:font/ascii.png', ascent:7, height:8, chars:['AB']}
+]}));
+fs.writeFileSync(path.join(fontDir, 'include', 'unifont.json'), JSON.stringify({providers: [
+  {type:'unihex', hex_file:'minecraft:font/unifont.zip', size_overrides:[{from:'中',to:'中',left:0,right:15}]}
+]}));
+fs.writeFileSync(path.join(fontDir, 'unifont.zip'), makeStoredZip({
+  'unifont.hex': `4E2D:${'ffff'.repeat(16)}\n`
+}));
 const fixturePath = path.join(sceneDir, 'test.json');
 createdCodec.load(JSON.parse(JSON.stringify(fixture)), {path: fixturePath, name: 'test.json'});
 assert.strictEqual(Project.export_path, fixturePath, 'scene path is the format export path');
@@ -287,6 +317,62 @@ assert.deepStrictEqual(compiled.connections, fixture.connections);
 
 const hooks = global.__GFBSConsoleStudioTestHooks;
 assert(hooks, 'test hooks exposed');
+const fontProviders = hooks.loadMinecraftFontProviders('minecraft:default');
+assert.deepStrictEqual(fontProviders.map(provider => provider.kind), ['space', 'bitmap', 'unihex'], 'font reference providers expand in Minecraft declaration order');
+assert.strictEqual(fontProviders[1].file, 'minecraft:font/ascii.png', 'referenced bitmap provider data is retained');
+const parsedUnihexProvider = hooks.unihexProviderDescriptor(fontProviders[2]);
+assert(parsedUnihexProvider && parsedUnihexProvider.glyphs.has(0x4e2d), 'nested unifont.zip HEX glyphs are read from Minecraft resources');
+assert.deepStrictEqual(parsedUnihexProvider.overrides[0], {from:0x4e2d,to:0x4e2d,left:0,right:15}, 'Unihex CJK size overrides are decoded as code-point ranges');
+const fontState = hooks.getState();
+const savedFontSources = {
+  source_path:fontState.source_path,
+  workspace_root:fontState.workspace_root,
+  resource_roots:fontState.resource_roots.slice(),
+  minecraft_asset_source:fontState.minecraft_asset_source
+};
+fontState.source_path = null;
+fontState.workspace_root = null;
+fontState.resource_roots = [];
+fontState.minecraft_asset_source = null;
+hooks.clearPreviewCaches();
+const embeddedUnifontBytes = hooks.readBundledMinecraftFontResource('assets/minecraft/font/unifont.zip').bytes;
+assert.strictEqual(crypto.createHash('sha1').update(embeddedUnifontBytes).digest('hex'), 'a661b5622172ea1ce1fa9ec78fad484d118e5689', 'embedded Minecraft 1.20.1 unifont archive is byte-exact');
+for (const pngPath of ['ascii.png','accented.png','nonlatin_european.png']) {
+  const png = hooks.readBundledMinecraftFontResource(`assets/minecraft/textures/font/${pngPath}`);
+  assert(png && png.bytes.subarray(0,8).equals(Buffer.from([0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a])), `embedded ${pngPath} is a valid PNG resource`);
+}
+const fallbackProviders = hooks.loadMinecraftFontProviders('minecraft:default');
+assert.deepStrictEqual(fallbackProviders.map(provider => provider.kind), ['space','bitmap','bitmap','bitmap','unihex'], 'complete default font provider chain loads with no Minecraft installation');
+const fallbackUnihex = hooks.unihexProviderDescriptor(fallbackProviders.find(provider => provider.kind === 'unihex'));
+assert(fallbackUnihex && fallbackUnihex.glyphs.has('中'.codePointAt(0)), 'Chinese glyphs load from the complete embedded font pack when no launcher asset source exists');
+assert.strictEqual(fallbackUnihex.source, 'bundled:minecraft-1.20.1/default-font', 'missing launcher font uses the deterministic complete bundled provider');
+Object.assign(fontState, savedFontSources);
+hooks.clearPreviewCaches();
+assert.strictEqual(hooks.minecraftBitmapAdvance(5, 1), 6, 'bitmap glyph advance includes Minecraft one-pixel spacing');
+assert.strictEqual(hooks.minecraftBitmapAdvance(5, 0.5), 4, 'bitmap glyph advance uses Minecraft nearest-integer scale rounding');
+assert.deepStrictEqual(
+  hooks.minecraftLegacyGlyphMetrics(0x0f),
+  {left:0,right:16,pixelWidth:16,drawWidth:8,advance:9},
+  'legacy Unicode size nibbles produce Minecraft CJK width and advance'
+);
+assert.strictEqual(hooks.minecraftLegacyGlyphMetrics(0), null, 'zero legacy Unicode size means unsupported glyph');
+const fullUnihexGlyph = 'ffff'.repeat(16);
+assert.deepStrictEqual(
+  hooks.minecraftUnihexGlyphMetrics(fullUnihexGlyph),
+  {sourceWidth:16,rowHexLength:4,left:0,right:15,pixelWidth:16,drawWidth:8,advance:9},
+  'full-width Unihex CJK glyph keeps its 16px source and 9px Minecraft advance'
+);
+const narrowUnihexGlyph = '1800'.repeat(16);
+assert.deepStrictEqual(
+  hooks.minecraftUnihexGlyphMetrics(narrowUnihexGlyph),
+  {sourceWidth:16,rowHexLength:4,left:3,right:4,pixelWidth:2,drawWidth:1,advance:2},
+  'Unihex automatic bounds trim transparent columns before calculating advance'
+);
+assert.deepStrictEqual(
+  hooks.minecraftUnihexGlyphMetrics(narrowUnihexGlyph, {left:0,right:15}),
+  {sourceWidth:16,rowHexLength:4,left:0,right:15,pixelWidth:16,drawWidth:8,advance:9},
+  'Unihex size_override forces the same full-width CJK metrics used by Minecraft'
+);
 const refMap = new Map([['model', 'model_renamed'], ['node.with.dots', 'dotted_copy']]);
 assert.strictEqual(hooks.rewriteQualifiedReference('node.with.dots.value', refMap), 'dotted_copy.value', 'qualified references support dotted node IDs');
 assert.strictEqual(hooks.rewritePartReference('model::lamp', refMap), 'model_renamed::lamp', 'model part references are repaired');
@@ -448,6 +534,24 @@ pendingTextureLoad.texture.image = {width:16,height:16};
 pendingTextureLoad.onLoad(pendingTextureLoad.texture);
 assert.strictEqual(faceTexture.image.width, 16, 'the face texture receives the asynchronously decoded image');
 
+const launcherAssets = path.join(tempProject, 'launcher-assets');
+const indexedPayload = Buffer.from('INDEXED-MINECRAFT-ASSET');
+const indexedHash = 'ab'.repeat(20);
+fs.mkdirSync(path.join(launcherAssets, 'indexes'), {recursive:true});
+fs.mkdirSync(path.join(launcherAssets, 'objects', indexedHash.substring(0,2)), {recursive:true});
+fs.writeFileSync(path.join(launcherAssets, 'objects', indexedHash.substring(0,2), indexedHash), indexedPayload);
+fs.writeFileSync(path.join(launcherAssets, 'indexes', '5.json'), JSON.stringify({objects:{
+  'minecraft/font/unifont.zip': {hash:indexedHash,size:indexedPayload.length}
+}}));
+assert.strictEqual(hooks.normalizeMinecraftAssetStore(launcherAssets), launcherAssets, 'launcher indexes/objects asset store is recognized');
+const indexedSources = hooks.assetIndexSourcesForStore(launcherAssets);
+assert.strictEqual(indexedSources.length, 1, 'launcher asset index becomes a preview resource source');
+assert.deepStrictEqual(
+  hooks.readAssetIndexResource(indexedSources[0], 'assets/minecraft/font/unifont.zip'),
+  indexedPayload,
+  'hashed launcher asset objects resolve back to their logical Minecraft resource path'
+);
+
 const jarPath = path.join(tempProject, 'minecraft-test.jar');
 fs.writeFileSync(jarPath, makeStoredZip({
   'assets/minecraft/models/block/jar_only.json': JSON.stringify({parent:'minecraft:block/cube_all', textures:{all:'minecraft:block/jar_only'}}),
@@ -502,7 +606,127 @@ invalidActionType.connections[0].action.type = 'bad action';
 createdCodec.load(invalidActionType, {path: fixturePath, name: 'test.json'});
 assert.throws(() => createdCodec.compile({raw: true}), /validation error/, 'invalid unnamespaced action types are rejected');
 
-fs.rmSync(tempProject, {recursive:true, force:true});
-console.log('GFBS Console Studio round-trip + visual runtime smoke test: PASS');
-registeredPlugin.options.onunload();
-global.setTimeout = originalSetTimeout;
+if (process.env.GFBS_REAL_MC_ASSETS) {
+  const state = hooks.getState();
+  state.source_path = null;
+  state.workspace_root = null;
+  state.minecraft_asset_source = null;
+  state.resource_roots = [path.resolve(process.env.GFBS_REAL_MC_ASSETS)];
+  hooks.clearPreviewCaches();
+  const realProviders = hooks.loadMinecraftFontProviders('minecraft:default');
+  assert.deepStrictEqual(realProviders.map(provider => provider.kind), ['space','bitmap','bitmap','bitmap','unihex'], 'real Minecraft 1.20.1 font provider chain is supported');
+  const realUnihex = hooks.unihexProviderDescriptor(realProviders.find(provider => provider.kind === 'unihex'));
+  assert(realUnihex && realUnihex.glyphs.has('中'.codePointAt(0)), 'real Minecraft 1.20.1 unifont.zip provides Chinese glyphs');
+  const realChineseMetrics = hooks.minecraftUnihexGlyphMetrics(realUnihex.glyphs.get('中'.codePointAt(0)), realUnihex.overrides.find(entry => '中'.codePointAt(0) >= entry.from && '中'.codePointAt(0) <= entry.to));
+  assert.strictEqual(realChineseMetrics.advance, 9, 'real Minecraft Chinese glyph uses the expected 9px advance');
+
+  const realRoot = path.resolve(process.env.GFBS_REAL_MC_ASSETS);
+  const indexedRealStore = path.join(tempProject, 'real-indexed-assets');
+  const indexedObjects = {};
+  for (const relative of [
+    'assets/minecraft/font/default.json',
+    'assets/minecraft/font/include/space.json',
+    'assets/minecraft/font/include/default.json',
+    'assets/minecraft/font/include/unifont.json',
+    'assets/minecraft/font/unifont.zip'
+  ]) {
+    const bytes = fs.readFileSync(path.join(realRoot, relative));
+    const hash = crypto.createHash('sha1').update(bytes).digest('hex');
+    const destination = path.join(indexedRealStore, 'objects', hash.substring(0,2), hash);
+    fs.mkdirSync(path.dirname(destination), {recursive:true});
+    fs.writeFileSync(destination, bytes);
+    indexedObjects[relative.replace(/^assets\//, '')] = {hash,size:bytes.length};
+  }
+  fs.mkdirSync(path.join(indexedRealStore, 'indexes'), {recursive:true});
+  fs.writeFileSync(path.join(indexedRealStore, 'indexes', '5.json'), JSON.stringify({objects:indexedObjects}));
+  state.resource_roots = [];
+  state.minecraft_asset_source = indexedRealStore;
+  hooks.clearPreviewCaches();
+  const indexedRealProviders = hooks.loadMinecraftFontProviders('minecraft:default');
+  const indexedRealUnihex = hooks.unihexProviderDescriptor(indexedRealProviders.find(provider => provider.kind === 'unihex'));
+  assert(indexedRealUnihex && indexedRealUnihex.glyphs.has('中'.codePointAt(0)), 'real unifont.zip resolves through launcher asset index hashes, not only unpacked assets');
+
+  const hybridRoot = path.join(tempProject, 'portable-launcher');
+  const hybridJar = path.join(hybridRoot, 'libraries', 'com', 'mojang', 'minecraft', '1.20.1', 'minecraft-1.20.1-client.jar');
+  const hybridEntries = {};
+  for (const relative of [
+    'assets/minecraft/font/default.json',
+    'assets/minecraft/font/include/space.json',
+    'assets/minecraft/font/include/default.json',
+    'assets/minecraft/font/include/unifont.json'
+  ]) hybridEntries[relative] = fs.readFileSync(path.join(realRoot, relative));
+  fs.mkdirSync(path.dirname(hybridJar), {recursive:true});
+  fs.writeFileSync(hybridJar, makeStoredZip(hybridEntries));
+  fs.cpSync(indexedRealStore, path.join(hybridRoot, 'assets'), {recursive:true});
+  assert.deepStrictEqual(hooks.minecraftAssetStoresNearArchive(hybridJar), [path.join(hybridRoot, 'assets')], 'selected client JAR anchors a deeply nested portable-launcher asset store');
+  state.minecraft_asset_source = hybridJar;
+  hooks.clearPreviewCaches();
+  const hybridProviders = hooks.loadMinecraftFontProviders('minecraft:default');
+  const hybridUnihex = hooks.unihexProviderDescriptor(hybridProviders.find(provider => provider.kind === 'unihex'));
+  assert(hybridUnihex && hybridUnihex.glyphs.has('中'.codePointAt(0)), 'client JAR font JSON is supplemented by its launcher assets/objects unifont data regardless of nesting depth');
+}
+
+(async () => {
+  const renderState = hooks.getState();
+  renderState.source_path = null;
+  renderState.workspace_root = null;
+  renderState.resource_roots = [];
+  renderState.minecraft_asset_source = null;
+  hooks.clearPreviewCaches();
+  const cjkRaster = await hooks.renderMinecraftTextRaster('中文', '#FFFFFFFF');
+  assert.strictEqual(cjkRaster.width, 18, 'two real full-width Minecraft CJK glyphs use 18 logical pixels');
+  assert.strictEqual(cjkRaster.canvas.width, 36, 'Minecraft CJK raster uses the expected 2x pixel canvas');
+  const pixels = cjkRaster.canvas.getContext('2d').getImageData(0, 0, cjkRaster.canvas.width, cjkRaster.canvas.height).data;
+  let visiblePixels = 0;
+  for (let i = 3; i < pixels.length; i += 4) if (pixels[i]) visiblePixels++;
+  assert(visiblePixels > 40, 'rendered Chinese canvas contains real glyph strokes');
+  assert.strictEqual(cjkRaster.fontLocation, 'minecraft:default', 'rendered Chinese uses Minecraft default font, not browser monospace');
+
+  const bitmapOnlyRoot = path.join(tempProject, 'blockbench-bitmap-only-font');
+  const bitmapOnlyFontDir = path.join(bitmapOnlyRoot, 'assets', 'minecraft', 'font');
+  fs.mkdirSync(bitmapOnlyFontDir, {recursive:true});
+  fs.writeFileSync(path.join(bitmapOnlyFontDir, 'default.json'), JSON.stringify({providers:[
+    {type:'reference', id:'minecraft:include/default'}
+  ]}));
+  renderState.resource_roots = [bitmapOnlyRoot];
+  hooks.clearPreviewCaches();
+  const incompleteProviders = hooks.loadMinecraftFontProviders('minecraft:default');
+  assert(!incompleteProviders.some(provider => provider.kind === 'unihex'), 'fixture reproduces Blockbench valid-but-bitmap-only default font chain');
+  const completedProviders = hooks.completeMinecraftFontProviderDefinitions('minecraft:default');
+  assert(completedProviders.some(provider => provider.kind === 'unihex'), 'editor forcibly completes a bitmap-only default font with canonical Unihex');
+  const completedCjkRaster = await hooks.renderMinecraftTextRaster('中文', '#FFFFFFFF');
+  assert.strictEqual(completedCjkRaster.width, 18, 'forced Unihex completion renders two CJK glyphs at real Minecraft width');
+  const completedPixels = completedCjkRaster.canvas.getContext('2d').getImageData(0, 0, completedCjkRaster.canvas.width, completedCjkRaster.canvas.height).data;
+  let completedVisiblePixels = 0;
+  for (let i = 3; i < completedPixels.length; i += 4) if (completedPixels[i]) completedVisiblePixels++;
+  assert(completedVisiblePixels > 40, 'forced Unihex completion renders real Chinese strokes instead of missing-glyph boxes');
+
+  fs.writeFileSync(path.join(bitmapOnlyFontDir, 'broken.zip'), makeStoredZip({
+    'partial.hex': `0041:${'ffff'.repeat(16)}\n`
+  }));
+  fs.writeFileSync(path.join(bitmapOnlyFontDir, 'default.json'), JSON.stringify({providers:[
+    {type:'reference', id:'minecraft:include/default'},
+    {type:'unihex', hex_file:'minecraft:font/broken.zip'}
+  ]}));
+  hooks.clearPreviewCaches();
+  const partialUnihexProviders = hooks.completeMinecraftFontProviderDefinitions('minecraft:default');
+  assert(partialUnihexProviders.some(provider => provider.kind === 'unihex' && provider.hex_file === 'minecraft:font/broken.zip'), 'fixture exposes a valid but CJK-incomplete Unihex provider');
+  const canonicalFallbackRaster = await hooks.renderMinecraftTextRaster('中文', '#FFFFFFFF');
+  assert.strictEqual(canonicalFallbackRaster.width, 18, 'canonical direct lookup repairs a present-but-CJK-incomplete Blockbench Unihex provider');
+
+  renderState.resource_roots = [];
+  hooks.clearPreviewCaches();
+  const mixedRaster = await hooks.renderMinecraftTextRaster('QAEC - MRC - TARTARUS 顶部封锁系统 0-1 控制', '#FFFFFFFF');
+  const renderOutput = process.env.GFBS_FONT_RENDER_OUTPUT;
+  if (renderOutput) fs.writeFileSync(renderOutput, mixedRaster.canvas.toBuffer('image/png'));
+  fs.rmSync(tempProject, {recursive:true, force:true});
+  console.log('GFBS Console Studio round-trip + visual runtime smoke test: PASS');
+  registeredPlugin.options.onunload();
+  global.setTimeout = originalSetTimeout;
+})().catch(error => {
+  try { fs.rmSync(tempProject, {recursive:true, force:true}); } catch (_) {}
+  try { registeredPlugin.options.onunload(); } catch (_) {}
+  global.setTimeout = originalSetTimeout;
+  console.error(error);
+  process.exitCode = 1;
+});

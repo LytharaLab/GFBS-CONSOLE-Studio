@@ -27,6 +27,11 @@ GFBS Scene JSON 始终是 source of truth；不会要求 `.bbmodel` 中间格式
 - **完整快捷创建**：补齐 Knob、Lever、Slider、Indicator、Animation、Sound、Timer、Linear/Grid/Surface Layout。
 - **Resource Roots 可管理**：除了添加，还能删除、清空和调整优先级。
 - **节点类型图标**：Outliner 使用对应的 Model、Text、Sound、Control、Layout 等图标，复杂场景更易读。
+- **Minecraft 1.20.1 字体一致预览**：Text 不再使用浏览器 `monospace`；Studio 会读取 Minecraft `font/default.json`、位图字形与 `include/unifont` / `unifont.zip`，按游戏端相同的字符宽度、字距、ascent、2x oversample 与 9px 行高生成预览。中文不会再因系统字体回退而在进游戏后突变；legacy Unicode 资源包也仍可预览。
+
+Text 字体资源与 Vanilla 模型资源共用同一套来源解析。一般使用 **Auto-detect Minecraft 1.20.1 Assets** 即可；也可以通过 **Set Minecraft Client JAR...** 指定客户端 JAR。字体位图异步完成解码后，文字平面会自动按真实像素宽度重建，无需重新打开场景。若资源中缺少 `assets/minecraft/font/default.json`，Resource Status 会明确标记该 Text 正在使用临时系统字体，而不会把近似结果冒充为 MC 预览。
+
+Minecraft 1.20.1 的 `unifont.zip` 由 client JAR 内的字体定义引用，实际字节可能位于启动器的哈希资源库中。Studio 会把已经选中的 client JAR 作为安装根锚点并优先读取其资源；插件同时内置完整且字节一致的 1.20.1 默认字体资源组。Blockbench 若解析出“合法但只有 bitmap、没有 Unihex”的 `minecraft:default`，Studio 会强制把 1.20.1 原版 Unihex 追加为最终 Unicode 覆盖层；资源包 provider 保持更高优先级。若 Blockbench 提供的是残缺 Unihex，普通 provider 全部查找失败后还会直接查询内置原版码点，然后才允许进入 missing-glyph 分支。外部字体链无论在哪一环失真，原版支持的中文都不会再被画成方框。
 
 > Blockbench 自带的 **Move to Group / 移动至分组** 只面向原生 Group，不负责 GFBS Scene 节点。0.3.2 已从 Console 节点菜单移除这个误导入口，请使用拖放或 **Move to Console Parent...**。
 
@@ -560,6 +565,13 @@ npm test
 - Forge workspace resource resolution
 - Minecraft JAR/ZIP entry reader
 - 从 JAR 继承 Vanilla model geometry
+- Minecraft font reference provider 展开
+- bitmap / Unihex / legacy Unicode 字形宽度与 advance 计算
+- 由深层 client JAR 反向解析便携启动器 asset store
+- 完整内置默认字体 provider 链、三张 PNG 与 Unihex 档案的完整性及无 MC 安装回退
+- Headless Canvas 实际渲染“中文”及中英混合控制台标题，并校验宽度与非空字形像素
+- 模拟 Blockbench 返回“合法但仅 bitmap”的 `minecraft:default`，验证强制 Unihex 补全后仍实际渲染中文
+- 模拟“存在但不含中文”的残缺 Unihex provider，验证 canonical 码点直查阻断 missing-glyph 分支
 
 ## 预览边界
 

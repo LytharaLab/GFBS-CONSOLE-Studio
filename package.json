@@ -1,6 +1,6 @@
 {
   "name": "gfbs-console-studio",
-  "version": "0.3.2",
+  "version": "0.3.8",
   "private": true,
   "description": "Blockbench visual scene editor and preview runtime for GFBS-Main 3D-CONSOLE",
   "main": "dist/gfbs_console_studio.js",
@@ -9,6 +9,7 @@
     "test": "node --check src/gfbs_console_studio.js && node --check dist/gfbs_console_studio.js && node test/roundtrip-smoke.js"
   },
   "devDependencies": {
+    "@napi-rs/canvas": "0.1.100",
     "three": "0.129.0"
   },
   "license": "MIT"

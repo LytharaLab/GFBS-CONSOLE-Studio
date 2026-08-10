@@ -1,3 +1,51 @@
+## 0.3.8 - 2026-08-09 — Forced Runtime Unihex Completion
+
+- Fixed the Blockbench-specific chain where a valid external `minecraft:default` definition contains bitmap providers but omits Unihex. Because the JSON was valid, ordinary resource fallback never ran and the exact rasterizer emitted missing-glyph boxes.
+- The editor now treats the canonical Minecraft 1.20.1 Unihex provider as a mandatory completion layer for `minecraft:default`, appending it whenever Blockbench's resolved provider chain lacks one.
+- Resource-pack providers keep priority; the forced Unihex provider is only the final Unicode coverage layer.
+- Even if Blockbench exposes a malformed/partial Unihex provider, unresolved code points are queried directly against the bundled canonical archive before the missing-glyph renderer can run.
+- Added a regression scene whose externally resolved default font is deliberately valid but bitmap-only, then verified that real Canvas rendering still produces the correct Chinese glyph width and pixels.
+
+## 0.3.7 - 2026-08-09 — Complete Default Font Pack
+
+- Fixed the remaining failure mode where `unifont.zip` was available but the default font JSON chain or one of its bitmap atlases failed first, leaving the initial 8px browser-monospace canvas permanently visible.
+- Embedded the complete Minecraft 1.20.1 default font resource group: `default.json`, all three referenced include definitions, the ASCII/accented/non-Latin bitmap atlases, and the original Unihex archive.
+- Font JSON parsing, PNG decoding and Unihex archive parsing now retry the bundled byte-exact resources when an external source is absent or invalid.
+- Removed the visible system-font placeholder; text remains transparent only while the exact Minecraft raster is prepared.
+- Added full no-Minecraft-install provider-chain and asset-integrity regression coverage.
+
+## 0.3.6 - 2026-08-09 — Guaranteed CJK Font Source
+
+- Added the unmodified Minecraft 1.20.1 GNU Unifont archive as the final source of the existing Minecraft font-provider chain.
+- Studio still prefers `unifont.zip` resolved through the selected client JAR and its resource installation; if that referenced object is unavailable, the exact bundled archive is used instead of a system-font fallback or missing-glyph boxes.
+- Added byte-integrity and no-launcher-assets regression tests for the bundled archive and real Chinese glyphs.
+- Added the upstream GNU Unifont license and third-party notice.
+
+## 0.3.5 - 2026-08-09 — Client-JAR Anchored Font Resolution
+
+- The selected Minecraft client JAR is now the authoritative anchor for resolving its referenced font resources.
+- Fixed portable and third-party launcher layouts where the JAR is nested more than five levels below the shared `assets/indexes` + `assets/objects` store.
+- Studio now walks the JAR's complete ancestor chain and feeds the matching launcher object store into the same resource chain used by models, textures and fonts.
+- Added a real Minecraft 1.20.1 regression case for a deeply nested portable-launcher JAR and its Unihex Chinese glyph data.
+
+## 0.3.4 - 2026-08-09 — Launcher Asset Store / CJK Fix
+
+- Fixed Minecraft 1.20.1 CJK text turning into rows of white missing-glyph boxes even though the Latin bitmap font loaded correctly.
+- Added support for the launcher asset-store layout (`assets/indexes/*.json` + hashed `assets/objects/<prefix>/<sha1>`), which is where `minecraft/font/unifont.zip` may live even when the selected client/Forge JAR contains `default.json` and `ascii.png`.
+- Standard Minecraft Launcher, CurseForge, Prism Launcher and MultiMC asset stores are now auto-detected and appended as supplemental resource sources alongside the selected client JAR.
+- **Set Minecraft Assets Directory...** now accepts both an unpacked `assets/minecraft` tree and a launcher `indexes/` + `objects/` asset store.
+- If a declared Unihex/bitmap provider cannot be loaded and the text needs one of its glyphs, Studio now keeps the readable system-font fallback and reports the exact missing provider instead of silently drawing fake boxes.
+- Added regression coverage for launcher index resolution, hashed-object reads, the real 1.20.1 provider chain, the real `unifont.zip`, Chinese U+4E2D metrics, and real Unihex resolution through a launcher-style asset index.
+
+## 0.3.3 - 2026-08-09 — Minecraft Font Parity Hotfix
+
+- Replaced browser `monospace` text previews and fixed-width estimates with the Minecraft 1.20.1 default font provider pipeline.
+- Studio now reads `assets/minecraft/font/default.json`, expands reference providers, and uses the same bitmap glyph atlases, per-glyph advances, ascent, and 9-pixel line height as the game.
+- Added the Minecraft 1.20.1 `unihex` pipeline: Studio expands `minecraft:include/unifont`, reads `font/unifont.zip`, applies `size_overrides`, and renders CJK glyphs at the same 2x oversample and logical advances as the game. Legacy Unicode pages remain supported for resource-pack compatibility.
+- Text geometry is resized after the exact glyph atlas is ready, preserving `pixel_scale` while making Blockbench placement match the runtime.
+- Font textures use nearest-neighbor sampling and a 2x internal raster so 16px Unifont strokes survive the 8/9px logical font grid. Missing Minecraft font resources now produce an explicit resource warning and a temporary system-font fallback instead of silently pretending the preview is exact.
+- Added regression coverage for font reference expansion and Minecraft bitmap/legacy-Unicode advance calculations.
+
 ## 0.3.2 - 2026-08-09 — Console Reparenting Hotfix
 
 - Fixed `model`, `text`, and other Console nodes not becoming children when dropped onto a `node_3d` or other Console node in the Outliner.
